@@ -647,9 +647,39 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
     return 0;
 }
 
+/* True for a resolved memory-card path ("mc0:/..." / "mc1:/..."). */
+static int fs_is_mc_path(const char* path)
+{
+    return strncasecmp(path, "mc0:", 4) == 0 || strncasecmp(path, "mc1:", 4) == 0;
+}
+
+/* A busy memory card (or PCSX2's folder-backed MC right after a burst of
+ * create/erase operations) can fail an open() transiently -- observed as a
+ * spurious error while creating the first party proto of a save slot.
+ * Retry writable opens a few times before giving up; reads are never
+ * retried because the engine probes missing files on purpose. */
+static FILE* fs_mc_open_write_with_retry(const char* path, const char* mode)
+{
+    static const unsigned int waits_ms[] = { 25, 50, 100, 200 };
+    FILE* f = fopen(path, mode);
+    unsigned int i;
+
+    for (i = 0; f == NULL && i < sizeof(waits_ms) / sizeof(waits_ms[0]); i++) {
+        unsigned int start = ps2_time_ms();
+        while ((unsigned int)(ps2_time_ms() - start) < waits_ms[i]) {
+        }
+        printf("[ps2] fs: retrying write open %s (attempt %u)\n", path, i + 2);
+        f = fopen(path, mode);
+    }
+
+    return f;
+}
+
 static FILE* fs_do_open(const char* path, const char* mode, int writable)
 {
-    FILE* f = fopen(path, mode);
+    FILE* f = (writable && fs_is_mc_path(path))
+        ? fs_mc_open_write_with_retry(path, mode)
+        : fopen(path, mode);
 
     if (f != NULL && !writable) {
         size_t len = strlen(path);

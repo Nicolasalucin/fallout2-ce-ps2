@@ -293,6 +293,75 @@ int compat_remove(const char* path)
     return rc;
 }
 
+/* Copy fallback for compat_rename().
+ *
+ * ps2sdk's fileio backend registers no rename() handler, so the C library
+ * fails the call locally with ENOSYS before issuing any RPC (no rename ever
+ * reaches the emulator log). Copy the bytes and delete the source instead. */
+static int compat_rename_copy(const char* resolvedOld, const char* resolvedNew)
+{
+    /* 16 KiB static buffer: large enough to amortize the SIF RPC round
+     * trips, small enough to keep off the EE main-thread stack. */
+    static char buffer[16 * 1024];
+
+    FILE* source = fopen(resolvedOld, "rb");
+    if (source == nullptr) {
+        printf("[ps2] fs: rename fallback: cannot open source %s\n", resolvedOld);
+        return -1;
+    }
+
+    FILE* dest = fopen(resolvedNew, "wb");
+    if (dest == nullptr) {
+        fclose(source);
+        printf("[ps2] fs: rename fallback: cannot create %s\n", resolvedNew);
+        return -1;
+    }
+
+    int rc = 0;
+    for (;;) {
+        size_t readCount = fread(buffer, 1, sizeof(buffer), source);
+        if (readCount > 0 && fwrite(buffer, 1, readCount, dest) != readCount) {
+            rc = -1;
+            break;
+        }
+        if (readCount < sizeof(buffer)) {
+            if (ferror(source)) {
+                rc = -1;
+            }
+            break;
+        }
+    }
+
+    /* Close the destination before touching the source: the delete below
+     * must not race the last sector flush. */
+    if (fclose(dest) != 0) {
+        rc = -1;
+    }
+    fclose(source);
+
+    if (rc == 0) {
+        /* compat_remove() also clears the phantom directory the broken
+         * fioRemove leaves behind and drops the parent listing. */
+        rc = compat_remove(resolvedOld);
+        if (rc != 0) {
+            /* Source still in place: the rename did not happen, so drop the
+             * copy to keep the tree all-or-nothing. */
+            remove(resolvedNew);
+            rmdir(resolvedNew);
+        }
+    } else {
+        /* Do not leave a half-written copy behind. */
+        remove(resolvedNew);
+        rmdir(resolvedNew);
+    }
+
+    if (rc != 0) {
+        printf("[ps2] fs: rename fallback failed: %s -> %s\n", resolvedOld, resolvedNew);
+    }
+
+    return rc;
+}
+
 int compat_rename(const char* oldFileName, const char* newFileName)
 {
     char resolvedOld[COMPAT_MAX_PATH];
@@ -305,7 +374,17 @@ int compat_rename(const char* oldFileName, const char* newFileName)
         return -1;
     }
 
+    /* Renaming a file onto itself is a POSIX no-op, and the copy fallback
+     * must not touch the file in that case. */
+    if (strcmp(resolvedOld, resolvedNew) == 0) {
+        return 0;
+    }
+
     int rc = rename(resolvedOld, resolvedNew);
+
+    if (rc != 0) {
+        rc = compat_rename_copy(resolvedOld, resolvedNew);
+    }
 
     if (rc == 0) {
         /* Both parent listings changed. */
