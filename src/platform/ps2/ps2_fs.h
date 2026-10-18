@@ -83,10 +83,14 @@ int ps2_fs_directory_exists(const char* path);
  * final component may be absent (for creating files). Returns 0 on success. */
 int ps2_fs_canonicalize(char* path, int allow_missing_last);
 
-/* Drops every cached directory listing. The platform compat layer and the
- * save layer call this after an operation that changes a directory outside
- * the fopen() path (mkdir, remove, rename, slot wipe). */
+/* Drops every cached directory listing (the save-slot wipe removes whole
+ * directories). */
 void ps2_fs_invalidate_dir_cache(void);
+
+/* Drops the cached listing of the directory holding `resolved` (a canonical
+ * device path). compat_mkdir/compat_remove/compat_rename call this after
+ * changing a directory outside the fopen() path. */
+void ps2_fs_invalidate_parent_of(const char* resolved);
 
 #ifdef __cplusplus
 }

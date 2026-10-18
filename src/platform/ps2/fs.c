@@ -270,11 +270,76 @@ static void fs_dir_cache_invalidate(void)
 }
 
 /* Drops every cached listing on behalf of the layers that change directories
- * behind this module's back (compat_mkdir/compat_remove/compat_rename and
- * the save-slot wipe, which all sit above the fopen() path). */
+ * behind this module's back. Only the save-slot wipe uses this: it removes
+ * whole slot directories, so there is nothing specific to keep. */
 void ps2_fs_invalidate_dir_cache(void)
 {
     fs_dir_cache_invalidate();
+}
+
+/* Slot keys keep the mount point spelling of the path they were built from
+ * ("dev:" or "dev:/"), so directories are compared ignoring one trailing
+ * separator. */
+static int fs_path_same(const char* a, const char* b)
+{
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+
+    while (len_a > 0 && a[len_a - 1] == '/') {
+        len_a--;
+    }
+    while (len_b > 0 && b[len_b - 1] == '/') {
+        len_b--;
+    }
+
+    return len_a == len_b && strncasecmp(a, b, len_a) == 0;
+}
+
+/* Drops the listing of `dir` only. A directory listing changes when a file
+ * inside it appears, goes away or is renamed, and nothing else, so that is
+ * the only thing the writers above this module need to invalidate. Flushing
+ * the whole cache instead would send every following resolution back to the
+ * IOP -- during a save that is a host: dopen() burst interleaved with memory
+ * card writes, the exact traffic mix that upsets PCSX2's fileio HLE. */
+static void fs_dir_cache_invalidate_dir(const char* dir)
+{
+    int i;
+
+    for (i = 0; i < PS2_FS_DIR_CACHE_SLOTS; i++) {
+        fs_dir_cache_slot_t* slot = &s_dir_cache[i];
+
+        if (slot->valid && fs_path_same(slot->path, dir)) {
+            slot->valid = 0;
+        }
+    }
+}
+
+/* Invalidates the listing of the directory holding `resolved` (a canonical
+ * device path such as "mc0:/FALLOUT2_S01/proto/critters/00381.pro"). */
+void ps2_fs_invalidate_parent_of(const char* resolved)
+{
+    const char* slash;
+    char dir[PS2_FS_PATH_MAX];
+    size_t len;
+
+    if (resolved == NULL) {
+        return;
+    }
+
+    slash = strrchr(resolved, '/');
+    if (slash == NULL || slash == resolved) {
+        return;
+    }
+
+    len = (size_t)(slash - resolved);
+    if (len >= sizeof(dir)) {
+        return;
+    }
+
+    memcpy(dir, resolved, len);
+    dir[len] = '\0';
+
+    fs_dir_cache_invalidate_dir(dir);
 }
 
 static unsigned char fs_dirent_kind(const struct dirent* entry)
@@ -595,11 +660,11 @@ static FILE* fs_do_open(const char* path, const char* mode, int writable)
     }
 
     if (f != NULL && writable) {
-        /* Canonicalization above resolved this path against directory
-         * listings taken before the file existed; those entries are stale
-         * now and would hide the new file from a read that follows within
-         * the cache TTL (a save written and read back immediately). */
-        fs_dir_cache_invalidate();
+        /* The listing of the directory this file lives in is stale now: it
+         * was cached while resolving the path, before the file existed (a
+         * save written and read back immediately). Every other listing stays
+         * valid, so the next resolution does not have to scan it again. */
+        ps2_fs_invalidate_parent_of(path);
     }
 
     return f;
@@ -686,11 +751,9 @@ FILE* ps2_fs_fopen(const char* path, const char* mode)
         || strchr(mode, 'a') != NULL
         || strchr(mode, '+') != NULL;
 
-    if (writable) {
-        /* The engine is creating a file: a later directory scan must see it
-         * (save slots, debug.log, mods). */
-        fs_dir_cache_invalidate();
-    }
+    /* No cache flush here: the open path drops the listing of the directory
+     * it writes into once the file exists (fs_do_open). Flushing everything
+     * up front made every save file re-scan all the data roots. */
 
 #ifdef PS2_DEV_SMOKE_TEST
     ps2_fs_stat_fopen_calls++;

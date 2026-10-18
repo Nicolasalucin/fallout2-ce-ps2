@@ -213,7 +213,7 @@ int compat_mkdir(const char* path)
 
     /* The parent listing was cached while resolving [path], before the
      * directory existed. */
-    ps2_fs_invalidate_dir_cache();
+    ps2_fs_invalidate_parent_of(resolved);
 
     return rc;
 }
@@ -288,7 +288,7 @@ int compat_remove(const char* path)
     rmdir(resolved);
 
     /* The parent listing still names the removed file. */
-    ps2_fs_invalidate_dir_cache();
+    ps2_fs_invalidate_parent_of(resolved);
 
     return rc;
 }
@@ -308,8 +308,9 @@ int compat_rename(const char* oldFileName, const char* newFileName)
     int rc = rename(resolvedOld, resolvedNew);
 
     if (rc == 0) {
-        /* Both listings changed. */
-        ps2_fs_invalidate_dir_cache();
+        /* Both parent listings changed. */
+        ps2_fs_invalidate_parent_of(resolvedOld);
+        ps2_fs_invalidate_parent_of(resolvedNew);
     }
 
     return rc;
