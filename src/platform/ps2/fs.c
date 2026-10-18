@@ -41,6 +41,20 @@ static char s_roots[PS2_FS_MAX_ROOTS][PS2_FS_ROOT_MAX];
 static int s_root_count;
 static int s_probed;
 
+/* True for a resolved memory-card path ("mc0:/..." / "mc1:/..."). */
+static int fs_is_mc_path(const char* path)
+{
+    return strncasecmp(path, "mc0:", 4) == 0 || strncasecmp(path, "mc1:", 4) == 0;
+}
+
+/* Short busy wait used by the memory-card retries below. */
+static void fs_wait_ms(unsigned int ms)
+{
+    unsigned int start = ps2_time_ms();
+    while ((unsigned int)(ps2_time_ms() - start) < ms) {
+    }
+}
+
 #ifdef PS2_DEV_SMOKE_TEST
 /* Dev profiling: I/O call counters consumed by the smoke
  * harness. */
@@ -562,9 +576,8 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
         char match[PS2_FS_PATH_MAX];
         int found = 0;
         int last = sep == NULL;
-        fs_dir_iter_t it;
+        int attempts = 0;
         unsigned char kind = PS2_FS_KIND_UNKNOWN;
-        const char* name;
 
         if (comp_len == 0) {
             p = sep + 1;
@@ -591,20 +604,55 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
             continue;
         }
 
-        if (fs_dir_iter_begin(&it, dir) != 0) {
-            return -1;
-        }
-
         match[0] = '\0';
-        while ((name = fs_dir_iter_next(&it, &kind)) != NULL) {
-            if (strlen(name) == comp_len
-                && strncasecmp(p, name, comp_len) == 0) {
-                snprintf(match, sizeof(match), "%s", name);
-                found = 1;
+
+        /* Scan the current directory for this component. While a memory
+         * card is busy a listing can fail to open or come back incomplete,
+         * so a miss is retried before it is believed. */
+        for (;;) {
+            fs_dir_iter_t it;
+            const char* name;
+
+            found = 0;
+
+            if (fs_dir_iter_begin(&it, dir) != 0) {
+                if (fs_is_mc_path(dir) && attempts < 2) {
+                    attempts++;
+                    fs_dir_cache_invalidate_dir(dir);
+                    fs_wait_ms(50);
+                    printf("[ps2] fs: retrying dopen %s (attempt %u)\n", dir, attempts + 1);
+                    continue;
+                }
+                return -1;
+            }
+
+            while ((name = fs_dir_iter_next(&it, &kind)) != NULL) {
+                if (strlen(name) == comp_len
+                    && strncasecmp(p, name, comp_len) == 0) {
+                    snprintf(match, sizeof(match), "%s", name);
+                    found = 1;
+                    break;
+                }
+            }
+            fs_dir_iter_end(&it);
+
+            if (found) {
                 break;
             }
+
+            /* Do not rescan for a genuinely new last component (the caller
+             * allows it to be missing): that would add two scans and a
+             * wait per created file during every save. */
+            if (!(last && allow_missing_last) && fs_is_mc_path(dir) && attempts < 2) {
+                attempts++;
+                fs_dir_cache_invalidate_dir(dir);
+                fs_wait_ms(50);
+                printf("[ps2] fs: rescanning %s (attempt %u)\n", dir, attempts + 1);
+                continue;
+            }
+
+            break;
         }
-        fs_dir_iter_end(&it);
 
         /* Missing component: keep the requested spelling when the caller
          * allows creating the file, otherwise fail the resolution.
@@ -647,29 +695,25 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
     return 0;
 }
 
-/* True for a resolved memory-card path ("mc0:/..." / "mc1:/..."). */
-static int fs_is_mc_path(const char* path)
+/* A busy memory card can fail an open() transiently: PCSX2's folder-backed
+ * MC returns a spurious error while a previous flush is still in flight.
+ * Retry a few times before giving up. Safe for reads too: every read path
+ * reaching fs_do_open() was resolved through a readdir() listing that just
+ * confirmed the entry exists, so a failure cannot be a missing-file probe. */
+static FILE* fs_mc_open_with_retry(const char* path, const char* mode)
 {
-    return strncasecmp(path, "mc0:", 4) == 0 || strncasecmp(path, "mc1:", 4) == 0;
-}
-
-/* A busy memory card (or PCSX2's folder-backed MC right after a burst of
- * create/erase operations) can fail an open() transiently -- observed as a
- * spurious error while creating the first party proto of a save slot.
- * Retry writable opens a few times before giving up; reads are never
- * retried because the engine probes missing files on purpose. */
-static FILE* fs_mc_open_write_with_retry(const char* path, const char* mode)
-{
-    static const unsigned int waits_ms[] = { 25, 50, 100, 200 };
+    static const unsigned int waits_ms[] = { 50, 100, 250, 500, 1000 };
     FILE* f = fopen(path, mode);
     unsigned int i;
 
     for (i = 0; f == NULL && i < sizeof(waits_ms) / sizeof(waits_ms[0]); i++) {
-        unsigned int start = ps2_time_ms();
-        while ((unsigned int)(ps2_time_ms() - start) < waits_ms[i]) {
-        }
-        printf("[ps2] fs: retrying write open %s (attempt %u)\n", path, i + 2);
+        fs_wait_ms(waits_ms[i]);
+        printf("[ps2] fs: retrying open %s (attempt %u)\n", path, i + 2);
         f = fopen(path, mode);
+    }
+
+    if (f == NULL) {
+        printf("[ps2] fs: open failed after retries: %s (%s)\n", path, mode);
     }
 
     return f;
@@ -677,8 +721,8 @@ static FILE* fs_mc_open_write_with_retry(const char* path, const char* mode)
 
 static FILE* fs_do_open(const char* path, const char* mode, int writable)
 {
-    FILE* f = (writable && fs_is_mc_path(path))
-        ? fs_mc_open_write_with_retry(path, mode)
+    FILE* f = fs_is_mc_path(path)
+        ? fs_mc_open_with_retry(path, mode)
         : fopen(path, mode);
 
     if (f != NULL && !writable) {

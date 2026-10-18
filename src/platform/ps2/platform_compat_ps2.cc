@@ -229,6 +229,12 @@ FILE* compat_fopen(const char* path, const char* mode)
     return ps2_fs_fopen(path, mode);
 }
 
+/* True for a resolved memory-card path ("mc0:/..." / "mc1:/..."). */
+static bool is_mc_path(const char* path)
+{
+    return SDL_strncasecmp(path, "mc0:", 4) == 0 || SDL_strncasecmp(path, "mc1:", 4) == 0;
+}
+
 gzFile compat_gzopen(const char* path, const char* mode)
 {
     char resolved[COMPAT_MAX_PATH];
@@ -240,7 +246,28 @@ gzFile compat_gzopen(const char* path, const char* mode)
         return nullptr;
     }
 
-    return gzopen(resolved, mode);
+    gzFile stream = gzopen(resolved, mode);
+
+    /* Same transient memory-card window as in the C stdio layer (fs.c):
+     * retry before giving up. The path was just resolved through a
+     * readdir() listing, so a missing file is not the cause. */
+    if (stream == nullptr && is_mc_path(resolved)) {
+        static const unsigned int waits_ms[] = { 25, 50, 100, 200 };
+
+        for (size_t i = 0; stream == nullptr && i < sizeof(waits_ms) / sizeof(waits_ms[0]); i++) {
+            unsigned int start = ps2_time_ms();
+            while ((unsigned int)(ps2_time_ms() - start) < waits_ms[i]) {
+            }
+            printf("[ps2] fs: retrying gzopen %s (attempt %u)\n", resolved, (unsigned int)(i + 2));
+            stream = gzopen(resolved, mode);
+        }
+
+        if (stream == nullptr) {
+            printf("[ps2] fs: gzopen failed after retries: %s (%s)\n", resolved, mode);
+        }
+    }
+
+    return stream;
 }
 
 char* compat_fgets(char* buffer, int maxCount, FILE* stream)
