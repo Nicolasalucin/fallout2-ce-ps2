@@ -182,7 +182,23 @@ typedef struct Program {
     unsigned char* dynamicStrings; // dynamic strings table
     unsigned char* identifiers;
     unsigned char* procedures;
+#ifdef __PS2__
+    // NOTE (PS2 port): the R5900 silently masks the low 4 bits of `lq`/`sq`
+    // (128-bit) effective addresses, and newlib's `setjmp` saves registers
+    // with `sq`. `env` must therefore be 16-byte aligned at runtime: the
+    // attribute pads it to a 16-byte offset within the struct, and
+    // `programCreateByPath` aligns the enclosing block to 16 bytes. Otherwise
+    // the first store of `setjmp` lands on `procedures` and the script VM
+    // executes corrupted bytecode (seen in-game as "Bad opcode" errors and,
+    // eventually, a jump to a bogus address).
+    jmp_buf env __attribute__((aligned(16)));
+
+    // Original pointer returned by the engine allocator; `program` itself may
+    // be aligned up from it and the free path needs the original block.
+    void* rawAllocation;
+#else
     jmp_buf env;
+#endif
     unsigned int waitEnd; // end time of timer (field_74 + wait time)
     unsigned int waitStart; // time when wait was called
     int field_78; // time when program begin execution (for the first time)?, -1 - program never executed

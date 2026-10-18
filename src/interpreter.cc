@@ -1,5 +1,7 @@
 #include "interpreter.h"
 
+#include <stdint.h>
+
 #include <assert.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -457,7 +459,13 @@ void programFree(Program* program)
     delete program->stackValues;
     delete program->returnStackValues;
 
+#ifdef __PS2__
+    // NOTE (PS2 port): `program` may be aligned up inside the block handed
+    // out by the allocator, so the original pointer is the one to free.
+    internal_free_safe(program->rawAllocation, __FILE__, __LINE__);
+#else
     internal_free_safe(program, __FILE__, __LINE__); // "..\\int\\INTRPRET.C", 435
+#endif
 }
 
 // 0x467734
@@ -477,8 +485,28 @@ Program* programCreateByPath(const char* path)
     fileRead(data, 1, fileSize, stream);
     fileClose(stream);
 
+#ifdef __PS2__
+    // NOTE (PS2 port): `Program` contains a 16-byte aligned `jmp_buf` (see
+    // the struct declaration in interpreter.h); the engine allocator only
+    // guarantees 8-byte alignment, so over-allocate and align the block up,
+    // remembering the original pointer for the free path below.
+    void* rawAllocation = internal_malloc_safe(sizeof(Program) + 16, __FILE__, __LINE__);
+    Program* program = (Program*)(((uintptr_t)rawAllocation + 15) & ~(uintptr_t)15);
+#else
     Program* program = (Program*)internal_malloc_safe(sizeof(Program), __FILE__, __LINE__); // ..\\int\\INTRPRET.C, 463
+#endif
     memset(program, 0, sizeof(Program));
+
+#ifdef __PS2__
+    program->rawAllocation = rawAllocation;
+
+    // The alignment above is a correctness requirement, not a preference: if
+    // it is ever lost the `setjmp` in `_executeProc` corrupts `procedures`
+    // and the VM executes garbage. Cheap enough to check on every load.
+    if (((uintptr_t)&program->env & 0xF) != 0) {
+        printf("[ps2] interpreter: Program env misaligned (%p)\n", (void*)&program->env);
+    }
+#endif
 
     program->name = (char*)internal_malloc_safe(strlen(path) + 1, __FILE__, __LINE__); // ..\\int\\INTRPRET.C, 466
     strcpy(program->name, path);
@@ -2858,7 +2886,14 @@ void _executeProcedure(Program* program, int procedureIndex)
     int externalProcedureArgumentCount;
     int procedureFlags;
     char err[256];
+#ifdef __PS2__
+    // NOTE (PS2 port): keep the snapshot block 16-byte aligned (see the
+    // `Program` env member in interpreter.h - R5900 `lq`/`sq` mask the low 4
+    // address bits).
+    jmp_buf env __attribute__((aligned(16)));
+#else
     jmp_buf env;
+#endif
 
     procedurePtr = program->procedures + 4 + sizeof(Procedure) * procedureIndex;
     procedureFlags = stackReadInt32(procedurePtr, offsetof(Procedure, flags));
@@ -2904,7 +2939,14 @@ static void _doEvents()
     int oldProgramFlags;
     int oldInstructionPointer;
     int data;
+#ifdef __PS2__
+    // NOTE (PS2 port): keep the snapshot block 16-byte aligned (see the
+    // `Program` env member in interpreter.h - R5900 `lq`/`sq` mask the low 4
+    // address bits).
+    jmp_buf env __attribute__((aligned(16)));
+#else
     jmp_buf env;
+#endif
 
     if (_suspendEvents) {
         return;
