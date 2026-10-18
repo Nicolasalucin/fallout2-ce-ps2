@@ -5,6 +5,10 @@
 
 #include <fpattern/fpattern.h>
 
+#ifdef __PS2__
+#include "ps2_fs.h"
+#endif
+
 namespace fallout {
 
 // 0x4E6380
@@ -30,7 +34,22 @@ bool fileFindFirst(const char* path, DirectoryFileFindData* findData)
 
     char basePath[COMPAT_MAX_PATH];
     compat_makepath(basePath, drive, dir, nullptr, nullptr);
+#ifdef __PS2__
+    /* PS2 has no working directory: resolve the directory against the probed
+     * data roots (or the save device) before handing it to opendir(). The
+     * resolved spelling is only needed here - directories on a case-sensitive
+     * device (PCSX2's "host:" drive) must exist as written. */
+    {
+        char resolved[COMPAT_MAX_PATH];
+        if (ps2_fs_resolve(basePath, resolved, sizeof(resolved), 0) != 0) {
+            findData->dir = nullptr;
+            return false;
+        }
+        strcpy(basePath, resolved);
+    }
+#else
     compat_resolve_path(basePath);
+#endif
 
     findData->dir = opendir(basePath);
     if (findData->dir == nullptr) {

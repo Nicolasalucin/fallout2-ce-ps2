@@ -313,40 +313,20 @@ void compat_windows_path_to_native(char* path)
 
 void compat_resolve_path(char* path)
 {
-    /* Engine save directories (SAVEGAME\SLOTxx\...) are enumerated on the
-     * save device; the engine never sees the redirected location. */
-    {
-        char remapped[COMPAT_MAX_PATH];
-        if (ps2_save_remap(path, remapped, sizeof(remapped)) == 0) {
-            if (ps2_fs_canonicalize(remapped, 0) == 0) {
-                strcpy(path, remapped);
-            }
-            return;
-        }
-    }
-
-    /* Best effort: canonicalize in place. Device paths resolve directly;
-     * relative paths are tried against every data root. */
-    if (strchr(path, ':') != NULL) {
-        ps2_fs_canonicalize(path, 0);
-        return;
-    }
-
-    int roots = ps2_fs_root_count();
-    for (int i = 0; i < roots; i++) {
-        char candidate[COMPAT_MAX_PATH];
-        const char* root = ps2_fs_root_path(i);
-        if (root == NULL) {
-            continue;
-        }
-        if (snprintf(candidate, sizeof(candidate), "%s%s", root, path) >= (int)sizeof(candidate)) {
-            continue;
-        }
-        if (ps2_fs_canonicalize(candidate, 0) == 0) {
-            strcpy(path, candidate);
-            return;
-        }
-    }
+    /* Intentionally does nothing on PS2.
+     *
+     * The upstream POSIX implementation fixes the spelling (case) of each
+     * component in place, which keeps the string length unchanged - callers
+     * like gameConfigResolvePath() pass buffers whose size is exactly the
+     * length of the path (config values are allocated with internal_strdup),
+     * so writing anything longer here trashes the heap.
+     *
+     * A root-prefixed rewrite is not needed either: every engine file
+     * operation goes through ps2_fs_fopen()/compat_fopen(), which resolves
+     * relative paths against the probed data roots (and redirects save slots
+     * to the memory card). The only callers that need a resolved path are the
+     * opendir()-based directory scans; file_find.cc resolves those itself
+     * through ps2_fs_resolve(). */
 }
 
 int compat_access(const char* path, int mode)

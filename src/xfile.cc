@@ -13,6 +13,10 @@
 
 #include "file_find.h"
 
+#ifdef __PS2__
+#include "ps2_fs.h"
+#endif
+
 namespace fallout {
 
 typedef enum XFileEnumerationEntryType {
@@ -30,7 +34,9 @@ typedef struct XListEnumerationContext {
 typedef bool(XListEnumerationHandler)(XListEnumerationContext* context);
 
 static bool xlistEnumerate(const char* pattern, XListEnumerationHandler* handler, XList* xlist);
+#ifndef __PS2__
 static int xbaseMakeDirectory(const char* path);
+#endif
 static void xbaseCloseAll();
 static void xbaseExitHandler(void);
 static bool xlistEnumerateHandler(XListEnumerationContext* context);
@@ -530,6 +536,25 @@ bool xbaseOpen(const char* path)
         return true;
     }
 
+#ifdef __PS2__
+    // There is no process working directory on the PlayStation 2, so a
+    // directory-backed xbase cannot be probed with chdir(). The directory is
+    // resolved once through the platform filesystem layer and registered by
+    // its relative name; every file opened through it later is resolved
+    // against the data roots. This is what makes the "data" patch directory
+    // work: the engine asks for "text\english\game.msg" and the xbase turns
+    // it into "data\text\english\game.msg", which the FS layer resolves to
+    // <root>/data/text/english/game.msg.
+    if (!ps2_fs_directory_exists(path)) {
+        // FIXME: Leaking xbase and path.
+        return false;
+    }
+
+    xbase->next = gXbaseHead;
+    gXbaseHead = xbase;
+
+    return true;
+#else
     char workingDirectory[COMPAT_MAX_PATH];
     if (getcwd(workingDirectory, COMPAT_MAX_PATH) == nullptr) {
         // FIXME: Leaking xbase and path.
@@ -554,6 +579,7 @@ bool xbaseOpen(const char* path)
     gXbaseHead = xbase;
 
     return true;
+#endif
 }
 
 // 0x4DFB3C
@@ -702,6 +728,7 @@ void xlistFree(XList* xlist)
 // Recursively creates specified file path.
 //
 // 0x4DFFAC
+#ifndef __PS2__
 static int xbaseMakeDirectory(const char* filePath)
 {
     char workingDirectory[COMPAT_MAX_PATH];
@@ -767,6 +794,7 @@ static int xbaseMakeDirectory(const char* filePath)
 
     return 0;
 }
+#endif // !__PS2__
 
 // Closes all xbases.
 //

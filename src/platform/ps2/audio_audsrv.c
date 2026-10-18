@@ -63,6 +63,7 @@
  */
 
 #include "ps2_audio.h"
+#include "ps2_storage.h"
 #include "ps2_time.h"
 
 #include <stdio.h>
@@ -212,27 +213,59 @@ void ps2_audio_pump(void)
 
 /* audsrv's RPC server runs on the IOP; a successful bind means the module
  * actually started and its server thread registered, i.e. audsrv_init() can
- * no longer hang waiting for it. wait_ms <= 0 means "check once". */
+ * no longer hang waiting for it. wait_ms <= 0 means "check once".
+ *
+ * The bind is issued once, non-blocking (SIF_RPC_M_NOWAIT), and only its
+ * reply is polled with a bounded wait. A blocking sceSifBindRpc() parks the
+ * thread on a semaphore signalled by the SIF completion handler; if a
+ * completion is ever lost - which happens on PCSX2 under heavy I/O; see the
+ * file header - that wait never returns and the boot hangs here. Polling
+ * turns a lost completion into "audio unavailable" instead.
+ *
+ * The client data is static because the IOP's reply carries a pointer to it,
+ * so it must stay valid until the completion is processed. A new bind may
+ * only be sent once the previous one completed; the completion releases the
+ * packet (hdr.pkt_addr back to NULL), which is also how "bound, no server
+ * was listening" is told apart from "still in flight". */
+static SifRpcClientData_t s_bind_cd;
+static int s_bind_inflight;
+
+static void audsrv_bind_start(void)
+{
+    if (s_bind_cd.server != NULL) {
+        return;
+    }
+
+    if (s_bind_inflight) {
+        if (s_bind_cd.hdr.pkt_addr != NULL) {
+            return;
+        }
+        s_bind_inflight = 0;
+    }
+
+    memset(&s_bind_cd, 0, sizeof(s_bind_cd));
+    if (sceSifBindRpc(&s_bind_cd, AUDSRV_IRX, SIF_RPC_M_NOWAIT) >= 0) {
+        s_bind_inflight = (s_bind_cd.hdr.pkt_addr != NULL);
+    }
+}
+
 static int audsrv_server_is_up(int wait_ms)
 {
-    SifRpcClientData_t cd;
-    unsigned int start;
-
-    memset(&cd, 0, sizeof(cd));
-    start = ps2_time_ms();
+    unsigned int start = ps2_time_ms();
 
     for (;;) {
-        sceSifBindRpc(&cd, AUDSRV_IRX, 0);
-        if (cd.server != NULL) {
+        if (s_bind_cd.server != NULL) {
             return 1;
         }
+
+        audsrv_bind_start();
 
         if (wait_ms <= 0 || (int)(ps2_time_ms() - start) >= wait_ms) {
             return 0;
         }
 
-        /* Sleep between binds: the EE kernel never preempts a spinning
-         * thread, so even this pre-worker wait must yield. */
+        /* The reply is processed from the SIF command interrupt, so sleeping
+         * is enough to let it land; a spinning thread would starve it. */
         DelayThread(1000);
     }
 }
@@ -263,6 +296,23 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
     }
     s_chunk_bytes = samples * PS2_AUDIO_BYTES_PER_FRAME;
 
+    /* Emulator/dev workaround: when the game is launched from the host:
+     * filesystem (PCSX2, ps2link, ps2client), skip the audsrv bring-up.
+     *
+     * On PCSX2, once LIBSD has been started, an RPC bind to the audsrv server
+     * id hangs inside sceSifBindRpc() - even with SIF_RPC_M_NOWAIT, and even
+     * when no server is listening - which stalls the boot before the main
+     * menu. The Fallout 1 port issues the same calls in the same emulator
+     * without hanging, so the trigger is somewhere in this app's boot state;
+     * it is tracked as part of the audio/movie phase. Skipping the bring-up
+     * here keeps boots under an emulator usable (the engine runs fine
+     * without sound). Real devices (mass:/, cdrom0:, hdd0:) take the full
+     * path below, which is the one that ships. */
+    if (ps2_storage_elf_dir() != NULL && strncmp(ps2_storage_elf_dir(), "host:", 5) == 0) {
+        printf("[ps2] audio: host: filesystem, audsrv bring-up skipped (emulator)\n");
+        return -1;
+    }
+
     sceSifInitRpc(0);
 
     /* SDR driver for audsrv; loading it twice is harmless. If the load
@@ -285,7 +335,10 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
         int i;
 
         for (i = 0; i < path_count && !audsrv_server_is_up(0); i++) {
-            int id = SifLoadModule(paths[i], 0, NULL);
+            int id;
+
+            printf("[ps2] audio: loading '%s'\n", paths[i]);
+            id = SifLoadModule(paths[i], 0, NULL);
 
             printf("[ps2] audio: %s -> %d\n", paths[i], id);
             if (id >= 0 && !audsrv_server_is_up(1500)) {

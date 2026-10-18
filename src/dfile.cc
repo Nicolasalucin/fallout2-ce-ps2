@@ -11,6 +11,10 @@
 
 #include "platform_compat.h"
 
+#ifdef __PS2__
+#include "ps2_fs.h"
+#endif
+
 namespace fallout {
 
 // The size of decompression buffer for reading compressed [DFile]s.
@@ -49,6 +53,18 @@ static void dfileUngetCompressed(DFile* stream, int ch);
 DBase* dbaseOpen(const char* filePath)
 {
     assert(filePath); // "filename", "dfile.c", 74
+
+#ifdef __PS2__
+    // The engine probes the patch directory ("data") through this entry point
+    // as if it were a DAT file. On the PlayStation 2 that resolves to a real
+    // open() of the directory node, and the failed read that follows upsets
+    // the PCSX2 host filesystem HLE (the IOP RPC state is corrupted and the
+    // emulated IOP jumps into garbage ~100 ms later). Reject directories
+    // before any open() happens.
+    if (ps2_fs_directory_exists(filePath)) {
+        return nullptr;
+    }
+#endif
 
     FILE* stream = compat_fopen(filePath, "rb");
     if (stream == nullptr) {

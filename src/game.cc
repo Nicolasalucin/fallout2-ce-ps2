@@ -127,12 +127,17 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
     if (gameMemoryInit() == -1) {
         return -1;
     }
+#ifdef __PS2__
+    printf("[ps2] stage: memory init\n");
+#endif
 
     // Sfall config should be initialized before game config, since it can
     // override it's file name.
     sfallConfigInit(argc, argv);
-
     settingsInit(isMapper, argc, argv);
+#ifdef __PS2__
+    printf("[ps2] stage: settings init\n");
+#endif
 
     gIsMapper = isMapper;
 
@@ -141,14 +146,26 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
         sfallConfigExit();
         return -1;
     }
+#ifdef __PS2__
+    printf("[ps2] stage: db init\n");
+#endif
 
     // Message list repository is considered a specialized file manager, so
     // it should be initialized early in the process.
     messageListRepositoryInit();
+#ifdef __PS2__
+    printf("[ps2] stage: message repository\n");
+#endif
 
     programWindowSetTitle(windowTitle);
     _initWindow(1, a4);
+#ifdef __PS2__
+    printf("[ps2] stage: window init\n");
+#endif
     paletteInit();
+#ifdef __PS2__
+    printf("[ps2] stage: palette init\n");
+#endif
 
     const char* language = settings.system.language.c_str();
     if (compat_stricmp(language, FRENCH) == 0) {
@@ -168,6 +185,9 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
     if (!gIsMapper && skipOpeningMovies < 2) {
         showSplash();
     }
+#ifdef __PS2__
+    printf("[ps2] stage: splash done\n");
+#endif
 
     // CE: Handle debug mode (exactly as seen in `mapper2.exe`).
     const char* debugMode = settings.debug.mode.c_str();

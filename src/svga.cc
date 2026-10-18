@@ -106,6 +106,12 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
 
     Config resolutionConfig;
     if (configInit(&resolutionConfig)) {
+#ifndef __PS2__
+        // The GS backend is a fixed 640x480 8-bit framebuffer, and the engine
+        // always asks for that mode (_initWindow -> _init_mode_640_480). Many
+        // PC installs ship an f2_res.ini next to the data, though, so the
+        // resolution override is skipped on this port instead of letting it
+        // select a mode the video layer cannot present.
         if (configRead(&resolutionConfig, "f2_res.ini", false)) {
             int screenWidth;
             if (configGetInt(&resolutionConfig, "MAIN", "SCR_WIDTH", &screenWidth)) {
@@ -139,6 +145,7 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
             configGetInt(&resolutionConfig, "IFACE", "IFACE_BAR_SIDE_ART", &gInterfaceSidePanelsImageId);
             configGetBool(&resolutionConfig, "IFACE", "IFACE_BAR_SIDES_ORI", &gInterfaceSidePanelsExtendFromScreenEdge);
         }
+#endif // !__PS2__
         configFree(&resolutionConfig);
     }
 

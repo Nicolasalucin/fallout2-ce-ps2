@@ -373,6 +373,19 @@ if(PS2)
         COMMENT "Copying audsrv.irx next to the game ELF (PCSX2 host: root)"
     )
 
+    # Development convenience: PCSX2 resolves "host:" to the ELF's directory,
+    # so the game data has to be reachable from the build directory. When the
+    # repo has a local_assets folder (the standard place for a local install;
+    # it is never committed), link it next to the ELF so emulator runs need no
+    # manual setup. Copying the data is not an option: it is ~500 MiB.
+    if(CMAKE_HOST_UNIX AND EXISTS "${CMAKE_SOURCE_DIR}/local_assets")
+        add_custom_command(TARGET ${EXECUTABLE_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E create_symlink
+                    "../local_assets" "${CMAKE_CURRENT_BINARY_DIR}/local_assets"
+            COMMENT "Linking local_assets next to the game ELF (PCSX2 host: root)"
+        )
+    endif()
+
     # The SDL2-subset shim (src/platform/ps2/sdl/SDL.h) must win over any
     # other SDL.h on the include path.
     target_include_directories(${EXECUTABLE_NAME} BEFORE PRIVATE "src/platform/ps2/sdl")

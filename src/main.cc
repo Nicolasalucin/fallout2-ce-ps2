@@ -1,6 +1,7 @@
 #include "main.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "art.h"
@@ -91,6 +92,13 @@ int falloutMain(int argc, char** argv)
     }
 
     if (mainMenuWindowInit() == 0) {
+#ifdef __PS2__
+        // PS2 port: boot marker. The engine prints nothing by default and the
+        // main menu is the "boot finished" milestone the smoke harness (F6)
+        // waits for.
+        printf("[ps2] boot: main menu reached\n");
+        fflush(stdout);
+#endif
         bool done = false;
         while (!done) {
             keyboardReset();

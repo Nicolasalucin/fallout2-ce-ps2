@@ -44,11 +44,22 @@ int ps2_fs_root_count(void);
 /* Root path for diagnostics, e.g. "host:local_assets/". */
 const char* ps2_fs_root_path(int index);
 
+/* Kinds of the last component of a resolved path, taken from the readdir()
+ * entry type (d_type). PS2_FS_KIND_UNKNOWN means the driver did not report
+ * one. */
+#define PS2_FS_KIND_UNKNOWN 0
+#define PS2_FS_KIND_FILE 1
+#define PS2_FS_KIND_DIR 2
+
 /* Resolves `path` (relative engine path or absolute iomanX path) to a real,
  * correctly cased device path. `writable` allows resolving a not-yet-existing
  * last component and restricts relative lookups to writable roots if any
  * exist. Returns 0 on success (result copied to `out`). */
 int ps2_fs_resolve(const char* path, char* out, int out_size, int writable);
+
+/* Same as ps2_fs_resolve(), additionally reporting the kind of the last
+ * component in *out_kind (NULL to ignore). */
+int ps2_fs_resolve_kind(const char* path, char* out, int out_size, int writable, int* out_kind);
 
 /* Resolves and opens `path` with `mode` (fopen semantics). Returns NULL when
  * the file cannot be found in any root. */
@@ -57,6 +68,15 @@ FILE* ps2_fs_fopen(const char* path, const char* mode);
 /* Existence check without opening the file (compat_access(F_OK)). Resolves
  * `path` the same way ps2_fs_fopen() does but stops there. */
 int ps2_fs_exists(const char* path);
+
+/* Directory probe used when the engine registers a directory-backed xbase
+ * (src/xfile.cc) and to keep dbaseOpen() from opening a directory as a DAT
+ * file (src/dfile.cc).
+ *
+ * The answer comes from the readdir() entry type already collected while
+ * resolving the path, so no opendir() is issued on the target: on PCSX2 a
+ * dopen() of a regular file fails and upsets the host filesystem HLE. */
+int ps2_fs_directory_exists(const char* path);
 
 /* In-place case-insensitive canonicalization of a device path such as
  * "host:local_assets/master.dat". When `allow_missing_last` is non-zero the
