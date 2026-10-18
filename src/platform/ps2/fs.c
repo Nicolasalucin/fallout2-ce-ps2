@@ -269,6 +269,14 @@ static void fs_dir_cache_invalidate(void)
     s_dir_arena_used = 0;
 }
 
+/* Drops every cached listing on behalf of the layers that change directories
+ * behind this module's back (compat_mkdir/compat_remove/compat_rename and
+ * the save-slot wipe, which all sit above the fopen() path). */
+void ps2_fs_invalidate_dir_cache(void)
+{
+    fs_dir_cache_invalidate();
+}
+
 static unsigned char fs_dirent_kind(const struct dirent* entry)
 {
     if (entry->d_type == DT_DIR) {
@@ -584,6 +592,14 @@ static FILE* fs_do_open(const char* path, const char* mode, int writable)
             /* Block-read buffering for the big datafiles. */
             setvbuf(f, NULL, _IOFBF, PS2_FS_DAT_BUFSIZE);
         }
+    }
+
+    if (f != NULL && writable) {
+        /* Canonicalization above resolved this path against directory
+         * listings taken before the file existed; those entries are stale
+         * now and would hide the new file from a read that follows within
+         * the cache TTL (a save written and read back immediately). */
+        fs_dir_cache_invalidate();
     }
 
     return f;

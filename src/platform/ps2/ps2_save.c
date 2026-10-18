@@ -23,6 +23,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <loadfile.h>
+#include <sifrpc.h>
+
 #include "ps2_fs.h"
 
 #define PS2_SAVE_ROOT_MAX 80
@@ -139,6 +142,15 @@ void ps2_save_init(void)
      * inspectable from the build machine. */
     save_use_host("dev/smoke build");
 #else
+    /* The memory card fileio device needs MCMAN/MCSERV resident. The OSD
+     * normally loads them, but a raw-ELF boot (PCSX2, a bare loader) starts
+     * without them, exactly like the pad loads its own ROM modules. Failures
+     * (already loaded, no card) are harmless. */
+    SifInitRpc(0);
+    SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    SifLoadModule("rom0:MCMAN", 0, NULL);
+    SifLoadModule("rom0:MCSERV", 0, NULL);
+
     if (save_dir_exists("mc0:")) {
         snprintf(s_root, sizeof(s_root), "mc0:/");
         s_is_mc = 1;
@@ -515,6 +527,10 @@ int ps2_save_slot_wipe(int slot)
 
     remove(resolved);
     rmdir(resolved);
+
+    /* The wiped names are gone now; a listing cached while resolving them
+     * would still return them. */
+    ps2_fs_invalidate_dir_cache();
 
     printf("[ps2] save: wiped slot %02d (%d files)\n", slot, removed);
     return 0;

@@ -211,6 +211,10 @@ int compat_mkdir(const char* path)
      * (icon.sys + icon.icn) inside it. */
     ps2_save_slot_ensure_meta(resolved);
 
+    /* The parent listing was cached while resolving [path], before the
+     * directory existed. */
+    ps2_fs_invalidate_dir_cache();
+
     return rc;
 }
 
@@ -282,6 +286,10 @@ int compat_remove(const char* path)
      * phantom as well; rmdir() fails harmlessly when the path is gone. */
     int rc = remove(resolved);
     rmdir(resolved);
+
+    /* The parent listing still names the removed file. */
+    ps2_fs_invalidate_dir_cache();
+
     return rc;
 }
 
@@ -297,7 +305,14 @@ int compat_rename(const char* oldFileName, const char* newFileName)
         return -1;
     }
 
-    return rename(resolvedOld, resolvedNew);
+    int rc = rename(resolvedOld, resolvedNew);
+
+    if (rc == 0) {
+        /* Both listings changed. */
+        ps2_fs_invalidate_dir_cache();
+    }
+
+    return rc;
 }
 
 void compat_windows_path_to_native(char* path)

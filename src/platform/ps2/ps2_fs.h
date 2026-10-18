@@ -83,6 +83,11 @@ int ps2_fs_directory_exists(const char* path);
  * final component may be absent (for creating files). Returns 0 on success. */
 int ps2_fs_canonicalize(char* path, int allow_missing_last);
 
+/* Drops every cached directory listing. The platform compat layer and the
+ * save layer call this after an operation that changes a directory outside
+ * the fopen() path (mkdir, remove, rename, slot wipe). */
+void ps2_fs_invalidate_dir_cache(void);
+
 #ifdef __cplusplus
 }
 #endif
