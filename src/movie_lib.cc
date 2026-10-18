@@ -12,6 +12,10 @@
 #include "delay.h"
 #include "platform_compat.h"
 
+#ifdef __PS2__
+#include "ps2_audio.h"
+#endif
+
 namespace fallout {
 
 typedef struct MveMem {
@@ -615,6 +619,11 @@ static int syncWait()
         while ((sync_time + 1000 * compat_timeGetTime()) < 0) {
             late = 1;
             delay_ms(-(sync_time + 1000 * compat_timeGetTime()) / 1000 - 3);
+#ifdef __PS2__
+            /* PS2: the audio worker keeps the movie's sound cursor moving
+             * and SDL_Delay yields to it; top up the SPU2 ring while here. */
+            ps2_audio_pump();
+#endif
         }
         sync_time += sync_wait_quanta;
     }
@@ -869,6 +878,15 @@ static void MVE_syncSync()
 {
     if (sync_active) {
         while (sync_time + 1000 * compat_timeGetTime() < 0) {
+#ifdef __PS2__
+            /* PS2: never spin on the wall clock here. The EE kernel does not
+             * preempt a running thread, and the clock this loop waits on is
+             * advanced by the audio worker (movie frames are paced by their
+             * sound), so a bare spin freezes the console outright. Sleep to
+             * hand the CPU over and keep the SPU2 ring fed while waiting. */
+            delay_ms(1);
+            ps2_audio_pump();
+#endif
         }
     }
 }
@@ -1015,6 +1033,15 @@ static void _MVE_sndSync()
 #ifdef EMSCRIPTEN
         delay_ms(1);
 #endif
+#ifdef __PS2__
+        /* PS2: this path loops until the audio play cursor advances, and the
+         * cursor only moves while the audio worker thread runs; sleep so the
+         * EE switches to it instead of spinning the console into a freeze,
+         * and keep feeding the SPU2 ring, which is exactly what runs dry
+         * here. See src/platform/ps2/ps2_audio.h. */
+        delay_ms(1);
+        ps2_audio_pump();
+#endif
     }
 
     if (dword_6B3660 != dword_6B3AE4) {
@@ -1041,6 +1068,11 @@ static int syncWaitLevel(int wait)
         diff = deadline + 1000 * compat_timeGetTime();
         if (diff < 0) {
             delay_ms(-diff / 1000 - 3);
+#ifdef __PS2__
+            /* PS2: yield to the audio worker and keep the ring fed while
+             * waiting for the frame clock (see syncWait). */
+            ps2_audio_pump();
+#endif
         }
         diff = deadline + 1000 * compat_timeGetTime();
     } while (diff < 0);

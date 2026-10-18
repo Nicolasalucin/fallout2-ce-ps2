@@ -296,22 +296,14 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
     }
     s_chunk_bytes = samples * PS2_AUDIO_BYTES_PER_FRAME;
 
-    /* Emulator/dev workaround: when the game is launched from the host:
-     * filesystem (PCSX2, ps2link, ps2client), skip the audsrv bring-up.
-     *
-     * On PCSX2, once LIBSD has been started, an RPC bind to the audsrv server
-     * id hangs inside sceSifBindRpc() - even with SIF_RPC_M_NOWAIT, and even
-     * when no server is listening - which stalls the boot before the main
-     * menu. The Fallout 1 port issues the same calls in the same emulator
-     * without hanging, so the trigger is somewhere in this app's boot state;
-     * it is tracked as part of the audio/movie phase. Skipping the bring-up
-     * here keeps boots under an emulator usable (the engine runs fine
-     * without sound). Real devices (mass:/, cdrom0:, hdd0:) take the full
-     * path below, which is the one that ships. */
-    if (ps2_storage_elf_dir() != NULL && strncmp(ps2_storage_elf_dir(), "host:", 5) == 0) {
-        printf("[ps2] audio: host: filesystem, audsrv bring-up skipped (emulator)\n");
-        return -1;
-    }
+    /* Note: audsrv's bring-up used to be skipped when the game ran from the
+     * host: filesystem, because on PCSX2 the first RPC bind after loading
+     * LIBSD appeared to hang inside sceSifBindRpc(). The real cause was the
+     * boot-time dopen()/readdir() storm, which corrupted the IOP-HLE's RPC
+     * bookkeeping and left packets that never completed; the directory cache
+     * in fs.c removed it. Emulator runs use the same path as a real console
+     * now, and every step below still degrades gracefully (bounded polls)
+     * when a module cannot be started. */
 
     sceSifInitRpc(0);
 

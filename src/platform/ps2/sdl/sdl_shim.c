@@ -93,6 +93,11 @@ void SDL_Delay(Uint32 ms)
      * Yielding every millisecond keeps frame pacing accurate and the audio
      * thread alive. */
     while (ps2_time_us() < target) {
+        /* Long engine sleeps (fades, the MVE player's millisecond waits)
+         * must keep feeding audsrv: the ring is only topped up from this
+         * thread. The pump clamps its own rate, so a 1 ms tick costs
+         * nothing. */
+        ps2_audio_pump();
         DelayThread(1000);
     }
 }
