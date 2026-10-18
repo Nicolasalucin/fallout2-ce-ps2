@@ -268,11 +268,11 @@ static void process_sticks(const struct padButtonStatus* status, u32 now)
     last_time = now;
     dt = (float)elapsed / 1000.0f;
 
-    /* Left stick -> cursor. libpad reports the vertical axis with 0xFF at
-     * "up" (hardware and PCSX2 alike) while the cursor moves down for
-     * positive dy, so the vertical axis is negated. */
+    /* Left stick -> cursor. The DualShock report (and PCSX2's emulation of
+     * it) uses 0x00 for full left/up and 0xFF for full right/down, which maps
+     * straight onto SDL's convention: negative dy moves the cursor up. */
     speed_x = cursor_speed(stick_axis(status->ljoy_h));
-    speed_y = cursor_speed(-stick_axis(status->ljoy_v));
+    speed_y = cursor_speed(stick_axis(status->ljoy_v));
 
     s_vel_x += (speed_x - s_vel_x) * CURSOR_SMOOTHING;
     s_vel_y += (speed_y - s_vel_y) * CURSOR_SMOOTHING;
@@ -301,9 +301,11 @@ static void process_sticks(const struct padButtonStatus* status, u32 now)
         }
     }
 
-    /* Right stick -> scroll wheel. */
+    /* Right stick -> scroll wheel. The engine maps a positive wheel y to
+     * KEY_ARROW_UP (scroll up, see convertMouseWheelToArrowKey), and the
+     * stick reports "up" as 0x00, so the vertical axis is negated here. */
     s_wheel_x += stick_axis(status->rjoy_h) * WHEEL_MAX_SPEED * dt;
-    s_wheel_y += stick_axis(status->rjoy_v) * WHEEL_MAX_SPEED * dt;
+    s_wheel_y += -stick_axis(status->rjoy_v) * WHEEL_MAX_SPEED * dt;
 
     wx = (int)s_wheel_x;
     wy = (int)s_wheel_y;
