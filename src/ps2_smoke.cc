@@ -1705,7 +1705,17 @@ int ps2_smoke_main(void)
     if (s_run_part2) {
         SMOKE_LOG("=== PART 2: heavy stress + fps ===");
 
-        if (smoke_act_tour()) {
+        /* Part 2 can run alone (PS2_SMOKE_PART2 marker without PART1): it
+         * needs a booted game, so drive the frontend first. */
+        bool tourOk = true;
+        if (!s_run_part1) {
+            tourOk = smoke_act_frontend();
+            if (tourOk) {
+                tourOk = smoke_act_boot_game();
+            }
+        }
+
+        if (tourOk && smoke_act_tour()) {
             SMOKE_LOG("PART_2_PASSED");
         }
 
