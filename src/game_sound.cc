@@ -241,6 +241,14 @@ int gameSoundInit()
     audioInit(gameSoundIsCompressed);
 
     int cacheSize = settings.sound.cache_size;
+#ifdef __PS2__
+    /* PS2 port: fallout2.cfg ships cache_size=448; sound effects are streamed
+     * from the .DATs when they miss, so cap the cache to keep the EE heap
+     * free. */
+    if (cacheSize > 256) {
+        cacheSize = 256;
+    }
+#endif
     if (cacheSize >= 0x40000) {
         debugPrint("\n!!! Config file needs adustment.  Please remove the ");
         debugPrint("cache_size line and run fallout again.  This will reset ");

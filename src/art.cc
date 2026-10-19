@@ -135,6 +135,15 @@ int artInit()
     char string[200];
 
     int cacheSize = settings.system.art_cache_size;
+#ifdef __PS2__
+    /* PS2 port: the EE has 32 MB of RAM in total and fallout2.cfg ships
+     * Windows-era values (8 MB here). The art cache is the largest single
+     * engine cache, and a smaller one streams FRMs back in on demand, so
+     * clamp it to keep map transitions inside the heap. */
+    if (cacheSize > 4) {
+        cacheSize = 4;
+    }
+#endif
     if (!cacheInit(&gArtCache, artCacheGetFileSizeImpl, artCacheReadDataImpl, artCacheFreeImpl, cacheSize << 20)) {
         debugPrint("cache_init failed in art_init\n");
         return -1;

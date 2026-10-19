@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef __PS2__
+#include <malloc.h>
+#endif
+
 #include <vector>
 
 #include "animation.h"
@@ -742,6 +746,20 @@ void mapNewMap()
     gMapHeader.enteringTile = 20100;
     _obj_remove_all();
     animationStop();
+
+#ifdef __PS2__
+    /* PS2 port: 32 MB of RAM and no swap. The art cache can hold several
+     * megabytes of FRMs, most of which belong to the map being left (maps
+     * share very little art), and the next map's transient peak is what
+     * pushes the EE heap over the edge. Dropping the unreferenced entries
+     * here frees that memory; entries still in use survive because
+     * cacheFlush only evicts entries with no references. */
+    artCacheFlush();
+
+    /* Hand the merged free space at the top of the heap back to the system so
+     * the next map's peak has room; cheap and safe when there is none. */
+    malloc_trim(0);
+#endif
 
     // NOTE: Uninline.
     mapGlobalVariablesFree();
