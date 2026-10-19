@@ -2026,8 +2026,44 @@ static int scriptListExtentRead(ScriptListExtent* scriptExtent, File* stream)
 }
 
 // 0x4A5C50
+/* Drops every script list without touching programs, local vars or events.
+ * Used when a map state file replaces the whole script set: the previous
+ * map's extents were simply overwritten by scriptLoadAll (leaking one heap
+ * block per extent) and the interpreter Program list was left untouched
+ * (those Programs kept running, and every in-game map load added another
+ * generation). On a 32 MB EE that is what fills the heap in long sessions. */
+static void _scr_free_script_lists(void)
+{
+    for (int type = 0; type < SCRIPT_TYPE_COUNT; type++) {
+        ScriptList* scriptList = &(gScriptLists[type]);
+        ScriptListExtent* extent = scriptList->head;
+
+        while (extent != nullptr) {
+            ScriptListExtent* next = extent->next;
+            internal_free(extent);
+            extent = next;
+        }
+
+        scriptList->head = nullptr;
+        scriptList->tail = nullptr;
+        scriptList->length = 0;
+        scriptList->nextScriptId = 0;
+    }
+
+    gScriptsEnumerationScriptIndex = 0;
+    gScriptsEnumerationScriptListExtent = nullptr;
+    gScriptsEnumerationElevation = 0;
+}
+
 int scriptLoadAll(File* stream)
 {
+    _scr_free_script_lists();
+
+    /* Every Program created by a Script that is about to be replaced is
+     * unreachable now: the loaded scripts all start with program == nullptr
+     * and re-create their programs through scriptsExecStartProc(). */
+    programListFree();
+
     for (int index = 0; index < SCRIPT_TYPE_COUNT; index++) {
         ScriptList* scriptList = &(gScriptLists[index]);
 
