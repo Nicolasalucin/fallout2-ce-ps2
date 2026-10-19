@@ -2386,7 +2386,23 @@ int _scr_remove_all()
                         scriptListExtent = scriptListExtent->next;
                         scriptRemove(script->sid);
                     } else {
-                        scriptRemove(script->sid);
+                        // NOTE: scriptRemove resolves scripts by sid and skips
+                        // the ones flagged SCRIPT_FLAG_0x10. If two scripts
+                        // share a sid (party member scripts derive their sid
+                        // from the member's pid, so a stale copy can be
+                        // restored from a map state file), the kept one shadows
+                        // this copy and the removal does nothing, which used to
+                        // spin here forever. Advance manually instead; the list
+                        // is replaced or freed as part of the map change
+                        // anyway.
+                        Script* other;
+                        if (scriptGetScript(script->sid, &other) != -1
+                            && other != script
+                            && (other->flags & SCRIPT_FLAG_0x10) != 0) {
+                            index++;
+                        } else {
+                            scriptRemove(script->sid);
+                        }
                     }
                 }
             }
