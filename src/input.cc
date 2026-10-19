@@ -954,7 +954,7 @@ void _GNW95_process_message()
             }
             break;
         case SDL_QUIT:
-            exit(EXIT_SUCCESS);
+            gProgramIsActive = false;
             break;
         }
     }

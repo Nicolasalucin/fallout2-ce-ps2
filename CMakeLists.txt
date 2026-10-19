@@ -160,7 +160,6 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/map.cc"
     "src/map.h"
     "src/memory_defs.h"
-    "src/memory_manager.cc"
     "src/memory_manager.h"
     "src/memory.cc"
     "src/memory.h"
@@ -316,6 +315,7 @@ if(PS2)
         "src/platform/ps2/boot.c"
         "src/platform/ps2/ps2_time.c"
         "src/platform/ps2/ps2_mem.c"
+        "src/platform/ps2/ps2_heap.c"
         "src/platform/ps2/input_pad.c"
         "src/platform/ps2/video_gs.c"
         "src/platform/ps2/ps2_osk.c"
@@ -324,6 +324,7 @@ if(PS2)
         "src/platform/ps2/ps2_storage.c"
         "src/platform/ps2/audio_audsrv.c"
         "src/platform/ps2/platform_compat_ps2.cc"
+        "src/platform/ps2/memory_manager_ps2.cc"
         "src/platform/ps2/sdl/sdl_shim.c"
     )
 

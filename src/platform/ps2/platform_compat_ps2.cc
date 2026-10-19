@@ -246,6 +246,11 @@ gzFile compat_gzopen(const char* path, const char* mode)
         return nullptr;
     }
 
+    if (writable && is_mc_path(resolved)) {
+        printf("[ps2] compat_gzopen: writing to MC path %s\n", resolved);
+        ps2_fs_ensure_parent_dirs(resolved);
+    }
+
     gzFile stream = gzopen(resolved, mode);
 
     /* Same transient memory-card window as in the C stdio layer (fs.c):

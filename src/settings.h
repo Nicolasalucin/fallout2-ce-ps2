@@ -16,7 +16,7 @@ struct SystemSettings {
     std::string language = ENGLISH;
     int scroll_lock = 0;
     bool interrupt_walk = true;
-    int art_cache_size = 8;
+    int art_cache_size = 4;
     bool color_cycling = true;
     int cycle_speed_factor = 1;
     bool hashing = true;
@@ -61,7 +61,7 @@ struct SoundSettings {
     int music_volume = 22281;
     int sndfx_volume = 22281;
     int speech_volume = 22281;
-    int cache_size = 448;
+    int cache_size = 256;
     std::string music_path1 = "sound\\music\\";
     std::string music_path2 = "sound\\music\\";
 };

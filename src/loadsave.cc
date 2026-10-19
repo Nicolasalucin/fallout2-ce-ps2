@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <dirent.h>
 
 #include <algorithm>
 
@@ -28,6 +29,7 @@
 #include "game_sound.h"
 #include "geometry.h"
 #include "input.h"
+#include "ps2_save.h"
 #include "interface.h"
 #include "item.h"
 #include "kb.h"
@@ -282,6 +284,13 @@ static LoadSaveSlotData _LSData[10];
 
 // 0x614280
 static int _LSstatus[10];
+static bool _LSstatus_valid = false;
+
+/* Invalidate the cached slot list so it gets refreshed on next menu entry. */
+void lsgInvalidateSlotList(void)
+{
+    _LSstatus_valid = false;
+}
 
 // 0x6142A8
 static unsigned char* _thumbnail_image;
@@ -597,11 +606,15 @@ int lsgSaveGame(int mode)
         }
 
         if (keyCode == 500) {
+            debugPrint("LOADSAVE: Key 500 pressed, slot %d status %d\n", _slot_cursor, _LSstatus[_slot_cursor]);
             if (_LSstatus[_slot_cursor] == SLOT_STATE_OCCUPIED) {
                 rc = 1;
                 // Save game already exists, overwrite?
                 const char* title = getmsg(&gLoadSaveMessageList, &gLoadSaveMessageListItem, 131);
-                if (showDialogBox(title, nullptr, 0, 169, 131, _colorTable[32328], nullptr, _colorTable[32328], DIALOG_BOX_YES_NO) == 0) {
+                debugPrint("LOADSAVE: Showing overwrite dialog\n");
+                int dialogResult = showDialogBox(title, nullptr, 0, 169, 131, _colorTable[32328], nullptr, _colorTable[32328], DIALOG_BOX_YES_NO);
+                debugPrint("LOADSAVE: Overwrite dialog returned %d\n", dialogResult);
+                if (dialogResult == 0) {
                     rc = -1;
                 }
             } else {
@@ -1686,6 +1699,7 @@ static int lsgPerformSaveGame()
 
     backgroundSoundResume();
 
+    lsgInvalidateSlotList();
     return 0;
 }
 
@@ -1993,37 +2007,67 @@ static int lsgLoadHeaderInSlot(int slot)
 // 0x47E5D0
 static int _GetSlotList()
 {
-    int index = 0;
-    for (; index < 10; index += 1) {
-        snprintf(_str, sizeof(_str), "%s\\%s%.2d\\%s", "SAVEGAME", "SLOT", index + 1, "SAVE.DAT");
+    if (_LSstatus_valid) {
+        debugPrint("LOADSAVE: Using cached slot list\n");
+        return 0;
+    }
 
-        int fileSize;
-        if (dbGetFileSize(_str, &fileSize) != 0) {
-            _LSstatus[index] = SLOT_STATE_EMPTY;
-        } else {
-            _flptr = fileOpen(_str, "rb");
+    debugPrint("LOADSAVE: Scanning save slots...\n");
 
-            if (_flptr == nullptr) {
-                debugPrint("\nLOADSAVE: ** Error opening save  game for reading! **\n");
-                return -1;
-            }
+    // Initialize all slots as empty
+    for (int i = 0; i < 10; i++) {
+        _LSstatus[i] = SLOT_STATE_EMPTY;
+    }
 
-            if (lsgLoadHeaderInSlot(index) == -1) {
-                if (_ls_error_code == 1) {
-                    debugPrint("LOADSAVE: ** save file #%d is an older version! **\n", _slot_cursor);
-                    _LSstatus[index] = SLOT_STATE_UNSUPPORTED_VERSION;
-                } else {
-                    debugPrint("LOADSAVE: ** Save file #%d corrupt! **", index);
-                    _LSstatus[index] = SLOT_STATE_ERROR;
+    // Get the save device root (mc0:/ or host:local_assets/saves/)
+    const char* save_root = ps2_save_root();
+    if (save_root[0] == '\0') {
+        debugPrint("LOADSAVE: No save device available\n");
+        _LSstatus_valid = true;
+        return 0;
+    }
+
+    char path[COMPAT_MAX_PATH];
+    DIR* d = opendir(save_root);
+    if (d == NULL) {
+        debugPrint("LOADSAVE: Cannot open save root %s\n", save_root);
+        _LSstatus_valid = true;
+        return 0;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (strncasecmp(entry->d_name, "FALLOUT2_S", 10) == 0) {
+            int slot = (entry->d_name[10] - '0') * 10 + (entry->d_name[11] - '0') - 1;
+            if (slot >= 0 && slot < 10) {
+                snprintf(path, sizeof(path), "%s%s/SAVE.DAT", save_root, entry->d_name);
+                
+                int fileSize;
+                if (dbGetFileSize(path, &fileSize) == 0) {
+                    _flptr = fileOpen(path, "rb");
+                    if (_flptr != nullptr) {
+                        if (lsgLoadHeaderInSlot(slot) == -1) {
+                            if (_ls_error_code == 1) {
+                                debugPrint("LOADSAVE: ** save file #%d is an older version! **\n", slot);
+                                _LSstatus[slot] = SLOT_STATE_UNSUPPORTED_VERSION;
+                            } else {
+                                debugPrint("LOADSAVE: ** Save file #%d corrupt! **", slot);
+                                _LSstatus[slot] = SLOT_STATE_ERROR;
+                            }
+                        } else {
+                            _LSstatus[slot] = SLOT_STATE_OCCUPIED;
+                        }
+                        fileClose(_flptr);
+                    }
                 }
-            } else {
-                _LSstatus[index] = SLOT_STATE_OCCUPIED;
             }
-
-            fileClose(_flptr);
         }
     }
-    return index;
+    closedir(d);
+
+    _LSstatus_valid = true;
+    debugPrint("LOADSAVE: Slot scan complete\n");
+    return 0;
 }
 
 // 0x47E6D8

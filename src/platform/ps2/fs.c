@@ -527,6 +527,84 @@ static void fs_dir_iter_end(fs_dir_iter_t* it)
     }
 }
 
+/* Creates all missing parent directories of a resolved MC path (e.g.
+ * "mc0:/FALLOUT2_S02/proto/critters/00381.pro"). The path must be a
+ * canonical device path returned by ps2_fs_resolve(). */
+void ps2_fs_ensure_parent_dirs(const char* resolved)
+{
+    if (resolved == NULL) {
+        return;
+    }
+
+    printf("[ps2] fs: ensure_parent_dirs for %s\n", resolved);
+
+    const char* slash = strrchr(resolved, '/');
+    if (slash == NULL || slash == resolved) {
+        return;
+    }
+
+    char dir[PS2_FS_PATH_MAX];
+    size_t len = (size_t)(slash - resolved);
+    if (len >= sizeof(dir)) {
+        return;
+    }
+    memcpy(dir, resolved, len);
+    dir[len] = '\0';
+
+    /* Walk from the mount point down, creating each missing component. */
+    const char* p = dir;
+    const char* colon = strchr(p, ':');
+    if (colon != NULL) {
+        p = colon + 1;
+        if (*p == '/') p++;
+    }
+    char accum[PS2_FS_PATH_MAX];
+    size_t accum_len = 0;
+    const char* mount_end = p;
+    while (*mount_end != '\0' && *mount_end != '/') mount_end++;
+    if (mount_end > p) {
+        size_t mount_len = mount_end - p;
+        if (accum_len + mount_len + 1 < sizeof(accum)) {
+            memcpy(accum + accum_len, p, mount_len);
+            accum_len += mount_len;
+        }
+        if (*mount_end == '/') {
+            accum[accum_len++] = '/';
+        }
+        accum[accum_len] = '\0';
+        p = mount_end + 1;
+    }
+
+    while (*p != '\0') {
+        const char* next = strchr(p, '/');
+        size_t comp_len = next ? (size_t)(next - p) : strlen(p);
+        if (accum_len + comp_len + 1 >= sizeof(accum)) break;
+        if (accum_len > 0 && accum[accum_len - 1] != '/') {
+            accum[accum_len++] = '/';
+        }
+        memcpy(accum + accum_len, p, comp_len);
+        accum_len += comp_len;
+        accum[accum_len] = '\0';
+
+        /* Check if this component exists; if not, create it. */
+        fs_dir_iter_t it;
+        if (fs_dir_iter_begin(&it, accum) != 0) {
+            if (mkdir(accum, 0755) == 0) {
+                printf("[ps2] fs: created missing dir %s\n", accum);
+                /* Invalidate the parent directory's cache so the new
+                 * subdirectory becomes visible immediately. */
+                ps2_fs_invalidate_parent_of(accum);
+            }
+        } else {
+            /* Directory already exists in cache/listing. */
+            fs_dir_iter_end(&it);
+        }
+
+        if (next == NULL) break;
+        p = next + 1;
+    }
+}
+
 static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kind);
 
 int ps2_fs_canonicalize(char* path, int allow_missing_last)
@@ -604,11 +682,11 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
             continue;
         }
 
-        match[0] = '\0';
-
         /* Scan the current directory for this component. While a memory
          * card is busy a listing can fail to open or come back incomplete,
-         * so a miss is retried before it is believed. */
+         * so a miss is retried before it is believed. PCSX2's folder-backed
+         * MC can take seconds to make a newly-created subdirectory visible
+         * in the parent listing after a burst of save writes. */
         for (;;) {
             fs_dir_iter_t it;
             const char* name;
@@ -616,10 +694,10 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
             found = 0;
 
             if (fs_dir_iter_begin(&it, dir) != 0) {
-                if (fs_is_mc_path(dir) && attempts < 2) {
+                if (fs_is_mc_path(dir) && attempts < 4) {
                     attempts++;
                     fs_dir_cache_invalidate_dir(dir);
-                    fs_wait_ms(50);
+                    fs_wait_ms(attempts <= 2 ? 100 : (attempts == 3 ? 500 : 1500));
                     printf("[ps2] fs: retrying dopen %s (attempt %u)\n", dir, attempts + 1);
                     continue;
                 }
@@ -641,13 +719,14 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
             }
 
             /* Do not rescan for a genuinely new last component (the caller
-             * allows it to be missing): that would add two scans and a
-             * wait per created file during every save. */
-            if (!(last && allow_missing_last) && fs_is_mc_path(dir) && attempts < 2) {
+             * allows it to be missing): that would add scans and waits
+             * per created file during every save. */
+            if (!(last && allow_missing_last) && fs_is_mc_path(dir) && attempts < 4) {
                 attempts++;
                 fs_dir_cache_invalidate_dir(dir);
-                fs_wait_ms(50);
-                printf("[ps2] fs: rescanning %s (attempt %u)\n", dir, attempts + 1);
+                fs_wait_ms(attempts <= 2 ? 100 : (attempts == 3 ? 500 : 1500));
+                printf("[ps2] fs: rescanning %s for '%.*s' (attempt %u)\n",
+                       dir, (int)comp_len, p, attempts + 1);
                 continue;
             }
 
@@ -719,8 +798,80 @@ static FILE* fs_mc_open_with_retry(const char* path, const char* mode)
     return f;
 }
 
+/* Ensure all parent directories of `path` exist. Used before opening
+ * a file for writing on the memory card, where the save-slot subdirs
+ * (proto/critters/, proto/items/, etc.) may not exist yet. */
+static void fs_ensure_parent_dirs(const char* path)
+{
+    char dir[PS2_FS_PATH_MAX];
+    const char* slash = strrchr(path, '/');
+    if (slash == NULL || slash == path) {
+        return;
+    }
+    size_t len = (size_t)(slash - path);
+    if (len >= sizeof(dir)) {
+        return;
+    }
+    memcpy(dir, path, len);
+    dir[len] = '\0';
+
+    /* Walk from the mount point down, creating each missing component. */
+    const char* p = dir;
+    const char* colon = strchr(p, ':');
+    if (colon != NULL) {
+        p = colon + 1;
+        if (*p == '/') p++;
+    }
+    char accum[PS2_FS_PATH_MAX];
+    size_t accum_len = 0;
+    const char* mount_end = p;
+    while (*mount_end != '\0' && *mount_end != '/') mount_end++;
+    if (mount_end > p) {
+        size_t mount_len = mount_end - p;
+        if (accum_len + mount_len + 1 < sizeof(accum)) {
+            memcpy(accum + accum_len, p, mount_len);
+            accum_len += mount_len;
+        }
+        if (*mount_end == '/') {
+            accum[accum_len++] = '/';
+        }
+        accum[accum_len] = '\0';
+        p = mount_end + 1;
+    }
+
+    while (*p != '\0') {
+        const char* next = strchr(p, '/');
+        size_t comp_len = next ? (size_t)(next - p) : strlen(p);
+        if (accum_len + comp_len + 1 >= sizeof(accum)) break;
+        if (accum_len > 0 && accum[accum_len - 1] != '/') {
+            accum[accum_len++] = '/';
+        }
+        memcpy(accum + accum_len, p, comp_len);
+        accum_len += comp_len;
+        accum[accum_len] = '\0';
+
+        /* Check if this component exists; if not, create it. */
+        fs_dir_iter_t it;
+        if (fs_dir_iter_begin(&it, accum) != 0) {
+            /* Directory doesn't exist or can't be read; create it. */
+            if (mkdir(accum, 0755) == 0) {
+                printf("[ps2] fs: created missing dir %s\n", accum);
+                ps2_fs_invalidate_parent_of(accum);
+            }
+        }
+        fs_dir_iter_end(&it);
+
+        if (next == NULL) break;
+        p = next + 1;
+    }
+}
+
 static FILE* fs_do_open(const char* path, const char* mode, int writable)
 {
+    if (writable && fs_is_mc_path(path)) {
+        ps2_fs_ensure_parent_dirs(path);
+    }
+
     FILE* f = fs_is_mc_path(path)
         ? fs_mc_open_with_retry(path, mode)
         : fopen(path, mode);
@@ -837,10 +988,14 @@ FILE* ps2_fs_fopen(const char* path, const char* mode)
     {
         char remapped[PS2_FS_PATH_MAX];
         if (ps2_save_remap(norm, remapped, sizeof(remapped)) == 0) {
+            printf("[ps2] fs_fopen: remapped '%s' -> '%s'\n", norm, remapped);
             if (ps2_fs_canonicalize(remapped, writable) != 0) {
+                printf("[ps2] fs_fopen: canonicalize failed for '%s'\n", remapped);
                 return NULL;
             }
             return fs_do_open(remapped, mode, writable);
+        } else {
+            printf("[ps2] fs_fopen: remap failed for '%s'\n", norm);
         }
     }
 

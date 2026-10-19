@@ -92,6 +92,10 @@ void ps2_fs_invalidate_dir_cache(void);
  * changing a directory outside the fopen() path. */
 void ps2_fs_invalidate_parent_of(const char* resolved);
 
+/* Ensures all parent directories of a writable MC path exist.
+ * Creates missing components along the path. */
+void ps2_fs_ensure_parent_dirs(const char* resolved);
+
 #ifdef __cplusplus
 }
 #endif

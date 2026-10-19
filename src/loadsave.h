@@ -18,6 +18,9 @@ void _InitLoadSave();
 void _ResetLoadSave();
 int lsgSaveGame(int mode);
 int lsgLoadGame(int mode);
+
+/* Invalidate the cached slot list (call after a successful save). */
+void lsgInvalidateSlotList(void);
 bool _isLoadingGame();
 void lsgInit();
 int MapDirErase(const char* path, const char* extension);
