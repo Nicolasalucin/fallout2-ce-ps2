@@ -30,8 +30,12 @@ option(FALLOUT_VENDORED "Use vendored third-party libraries" ON)
 # build command.
 # ---------------------------------------------------------------------------
 option(PS2_BUILD "Build for the PlayStation 2 (PS2SDK cross toolchain)" OFF)
+option(PS2_DEV_SMOKE_TEST "Enable F6 smoke harness (automated acceptance test)" OFF)
 if(PS2_BUILD)
     set(PS2 TRUE)
+endif()
+if(PS2_DEV_SMOKE_TEST)
+    add_compile_definitions(PS2_DEV_SMOKE_TEST)
 endif()
 
 if(ANDROID)
@@ -316,6 +320,9 @@ if(PS2)
         "src/platform/ps2/ps2_time.c"
         "src/platform/ps2/ps2_mem.c"
         "src/platform/ps2/ps2_heap.c"
+        "src/platform/ps2/ps2_log.c"
+        "src/platform/ps2/ps2_perf.c"
+        "src/platform/ps2/ps2_mem_guard.c"
         "src/platform/ps2/input_pad.c"
         "src/platform/ps2/video_gs.c"
         "src/platform/ps2/ps2_osk.c"
@@ -414,6 +421,8 @@ if(PS2)
         src/platform/ps2/boot.c
         src/platform/ps2/ps2_time.c
         src/platform/ps2/ps2_mem.c
+        src/platform/ps2/ps2_log.c
+        src/platform/ps2/ps2_perf.c
         src/platform/ps2/input_pad.c
         src/platform/ps2/video_gs.c
         src/platform/ps2/ps2_osk.c

@@ -54,3 +54,21 @@ size_t ps2_mem_free_space(void)
     struct mallinfo mi = mallinfo();
     return (size_t)mi.fordblks;  /* free ordinary blocks */
 }
+
+/* ---- Memory manager init/print (C linkage for smoke harness) ---- */
+
+void ps2_mem_init_procs(void)
+{
+    /* The actual implementation is in memory_manager_ps2.cc (fallout namespace).
+     * This C-linkage wrapper calls the C++ implementation. */
+    extern void fallout_ps2_mem_init_procs_impl(void);
+    fallout_ps2_mem_init_procs_impl();
+}
+
+void ps2_mem_print_stats(void)
+{
+    /* The actual implementation is in memory_manager_ps2.cc (fallout namespace).
+     * This C-linkage wrapper calls the C++ implementation. */
+    extern void fallout_ps2_mem_print_stats_impl(void);
+    fallout_ps2_mem_print_stats_impl();
+}

@@ -27,6 +27,7 @@
 #include <sifrpc.h>
 
 #include "ps2_fs.h"
+#include "ps2_log.h"
 
 #define PS2_SAVE_ROOT_MAX 80
 #define PS2_SAVE_PATH_MAX 256
@@ -187,14 +188,14 @@ int ps2_save_remap(const char* path, char* out, int out_size)
 
     ps2_save_init();
 
-    printf("[ps2] save_remap: in='%s'\n", path);
+    PS2_LOGV("[ps2] save_remap: in='%s'\n", path);
 
     p = path;
     if (strncasecmp(p, "data", 4) == 0 && (p[4] == '/' || p[4] == '\\')) {
         p += 5;
     }
     if (strncasecmp(p, "SAVEGAME", 8) != 0) {
-        printf("[ps2] save_remap: no SAVEGAME prefix, p='%s'\n", p);
+        PS2_LOGV("[ps2] save_remap: no SAVEGAME prefix, p='%s'\n", p);
         return -1;
     }
     p += 8;
@@ -202,12 +203,12 @@ int ps2_save_remap(const char* path, char* out, int out_size)
     if (*p == '\0') {
         /* The save root itself (the engine mkdir()s it before the slots). */
         snprintf(out, out_size, "%s", s_root);
-        printf("[ps2] save_remap: root -> '%s'\n", out);
+        PS2_LOGV("[ps2] save_remap: root -> '%s'\n", out);
         return 0;
     }
 
     if (*p != '/' && *p != '\\') {
-        printf("[ps2] save_remap: no separator after SAVEGAME, p='%s'\n", p);
+        PS2_LOGV("[ps2] save_remap: no separator after SAVEGAME, p='%s'\n", p);
         return -1;
     }
     p++;
@@ -215,16 +216,16 @@ int ps2_save_remap(const char* path, char* out, int out_size)
     if (strncasecmp(p, "SLOT", 4) != 0
         || p[4] < '0' || p[4] > '9'
         || p[5] < '0' || p[5] > '9') {
-        printf("[ps2] save_remap: bad SLOT, p='%s'\n", p);
+        PS2_LOGV("[ps2] save_remap: bad SLOT, p='%s'\n", p);
         return -1;
     }
     slot = (p[4] - '0') * 10 + (p[5] - '0');
     if (slot < 1 || slot > PS2_SAVE_SLOT_COUNT) {
-        printf("[ps2] save_remap: slot %d out of range\n", slot);
+        PS2_LOGV("[ps2] save_remap: slot %d out of range\n", slot);
         return -1;
     }
     if (p[6] != '\0' && p[6] != '/' && p[6] != '\\') {
-        printf("[ps2] save_remap: bad char after SLOT, p='%s'\n", p);
+        PS2_LOGV("[ps2] save_remap: bad char after SLOT, p='%s'\n", p);
         return -1;
     }
 
@@ -232,7 +233,7 @@ int ps2_save_remap(const char* path, char* out, int out_size)
 
     if (p[6] == '\0') {
         snprintf(out, out_size, "%s", dir);
-        printf("[ps2] save_remap: slot dir -> '%s'\n", out);
+        PS2_LOGV("[ps2] save_remap: slot dir -> '%s'\n", out);
         return 0;
     }
 
@@ -252,7 +253,7 @@ int ps2_save_remap(const char* path, char* out, int out_size)
     }
     out[len] = '\0';
 
-    printf("[ps2] save_remap: full -> '%s'\n", out);
+    PS2_LOGV("[ps2] save_remap: full -> '%s'\n", out);
     return 0;
 }
 
@@ -450,7 +451,7 @@ static void save_write_meta(const char* dir, int slot)
     snprintf(path, sizeof(path), "%s/icon.icn", dir);
     save_write_file(path, icn, sizeof(icn));
 
-    printf("[ps2] save: slot %02d browser metadata written in '%s'\n", slot, dir);
+    PS2_LOGV("[ps2] save: slot %02d browser metadata written in '%s'\n", slot, dir);
 }
 
 void ps2_save_slot_ensure_meta(const char* resolved_path)
@@ -542,6 +543,6 @@ int ps2_save_slot_wipe(int slot)
      * would still return them. */
     ps2_fs_invalidate_dir_cache();
 
-    printf("[ps2] save: wiped slot %02d (%d files)\n", slot, removed);
+    PS2_LOGV("[ps2] save: wiped slot %02d (%d files)\n", slot, removed);
     return 0;
 }

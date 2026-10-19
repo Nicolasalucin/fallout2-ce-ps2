@@ -30,6 +30,7 @@
 
 #include "ps2_input.h"
 
+#include "ps2_log.h"
 #include "ps2_osk.h"
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
@@ -214,7 +215,7 @@ static void process_buttons(u16 pressed)
             ps2_sdl_post_mouse_button(b->code, now);
         }
 
-        printf("[ps2] pad: %s %s\n", b->name, now ? "down" : "up");
+        PS2_LOGV("[ps2] pad: %s %s\n", b->name, now ? "down" : "up");
     }
 
     s_prev_buttons = pressed;
@@ -297,7 +298,7 @@ static void process_sticks(const struct padButtonStatus* status, u32 now)
 
         if (now - s_last_move_log >= DEBUG_MOVE_PERIOD_MS) {
             s_last_move_log = now;
-            printf("[ps2] pad: move %d,%d\n", dx, dy);
+            PS2_LOGV("[ps2] pad: move %d,%d\n", dx, dy);
         }
     }
 
@@ -329,7 +330,7 @@ static void log_raw_change(const struct padButtonStatus* status)
     last_mode = status->mode;
     last_btns = status->btns;
 
-    printf("[ps2] pad raw: mode=%02x btns=%04x l=(%d,%d) r=(%d,%d)\n",
+    PS2_LOGV("[ps2] pad raw: mode=%02x btns=%04x l=(%d,%d) r=(%d,%d)\n",
         status->mode, status->btns,
         status->ljoy_h, status->ljoy_v, status->rjoy_h, status->rjoy_v);
 }

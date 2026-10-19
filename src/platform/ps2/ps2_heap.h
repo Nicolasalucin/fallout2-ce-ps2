@@ -31,6 +31,12 @@ void* ps2_mem_memalign(size_t alignment, size_t size);
 /* Get total EE heap free space (approximate). */
 size_t ps2_mem_free_space(void);
 
+/* Initialize default memory manager procs (safe to call multiple times). */
+void ps2_mem_init_procs(void);
+
+/* Print memory usage statistics to stdout. */
+void ps2_mem_print_stats(void);
+
 #ifdef __cplusplus
 }
 #endif

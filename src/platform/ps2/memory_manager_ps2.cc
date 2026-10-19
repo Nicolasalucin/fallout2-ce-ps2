@@ -81,7 +81,7 @@ static void memoryManagerDefaultFreeImpl(void* ptr)
 
 /* ---- Initialize default procs at startup ---- */
 
-static void ps2_mem_init_procs(void)
+void ps2_mem_init_procs(void)
 {
     if (gMemoryManagerMallocProc == nullptr) {
         gMemoryManagerPrintErrorProc = memoryManagerDefaultPrintErrorImpl;
@@ -89,6 +89,11 @@ static void ps2_mem_init_procs(void)
         gMemoryManagerReallocProc = memoryManagerDefaultReallocImpl;
         gMemoryManagerFreeProc = memoryManagerDefaultFreeImpl;
     }
+}
+
+extern "C" void fallout_ps2_mem_init_procs_impl(void)
+{
+    ps2_mem_init_procs();
 }
 
 /* ---- memoryManagerSetProcs: called by gameMemoryInit() ---- */
@@ -257,13 +262,19 @@ char* strdup_safe(const char* string, const char* file, int line)
 
 /* ---- Diagnostics ---- */
 
-void ps2_mem_print_stats(void)
+void ps2_mem_print_stats_impl(void)
 {
     printf("[ps2] mem: used=%zu KB peak=%zu KB budget=%zu KB oom_events=%d\n",
            s_ps2_total_allocated / 1024,
            s_ps2_peak_allocated / 1024,
            PS2_MEM_TOTAL_BUDGET / 1024,
            s_ps2_oom_count);
+    fflush(stdout);
+}
+
+extern "C" void fallout_ps2_mem_print_stats_impl(void)
+{
+    ps2_mem_print_stats_impl();
 }
 
 int ps2_mem_get_usage_kb(void)
@@ -274,6 +285,11 @@ int ps2_mem_get_usage_kb(void)
 int ps2_mem_get_peak_kb(void)
 {
     return (int)(s_ps2_peak_allocated / 1024);
+}
+
+int ps2_mem_get_oom_count(void)
+{
+    return s_ps2_oom_count;
 }
 
 /* Cache reservation helpers */

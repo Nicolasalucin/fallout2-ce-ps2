@@ -7,6 +7,7 @@
 
 #include "ps2_fs.h"
 
+#include "ps2_log.h"
 #include "ps2_save.h"
 #include "ps2_storage.h"
 #include "ps2_time.h"
@@ -536,7 +537,7 @@ void ps2_fs_ensure_parent_dirs(const char* resolved)
         return;
     }
 
-    printf("[ps2] fs: ensure_parent_dirs for %s\n", resolved);
+    PS2_LOGV("[ps2] fs: ensure_parent_dirs for %s\n", resolved);
 
     const char* slash = strrchr(resolved, '/');
     if (slash == NULL || slash == resolved) {
@@ -590,7 +591,7 @@ void ps2_fs_ensure_parent_dirs(const char* resolved)
         fs_dir_iter_t it;
         if (fs_dir_iter_begin(&it, accum) != 0) {
             if (mkdir(accum, 0755) == 0) {
-                printf("[ps2] fs: created missing dir %s\n", accum);
+                PS2_LOGV("[ps2] fs: created missing dir %s\n", accum);
                 /* Invalidate the parent directory's cache so the new
                  * subdirectory becomes visible immediately. */
                 ps2_fs_invalidate_parent_of(accum);
@@ -698,7 +699,7 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
                     attempts++;
                     fs_dir_cache_invalidate_dir(dir);
                     fs_wait_ms(attempts <= 2 ? 100 : (attempts == 3 ? 500 : 1500));
-                    printf("[ps2] fs: retrying dopen %s (attempt %u)\n", dir, attempts + 1);
+                    PS2_LOGV("[ps2] fs: retrying dopen %s (attempt %u)\n", dir, attempts + 1);
                     continue;
                 }
                 return -1;
@@ -725,7 +726,7 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
                 attempts++;
                 fs_dir_cache_invalidate_dir(dir);
                 fs_wait_ms(attempts <= 2 ? 100 : (attempts == 3 ? 500 : 1500));
-                printf("[ps2] fs: rescanning %s for '%.*s' (attempt %u)\n",
+                PS2_LOGV("[ps2] fs: rescanning %s for '%.*s' (attempt %u)\n",
                        dir, (int)comp_len, p, attempts + 1);
                 continue;
             }
@@ -787,12 +788,12 @@ static FILE* fs_mc_open_with_retry(const char* path, const char* mode)
 
     for (i = 0; f == NULL && i < sizeof(waits_ms) / sizeof(waits_ms[0]); i++) {
         fs_wait_ms(waits_ms[i]);
-        printf("[ps2] fs: retrying open %s (attempt %u)\n", path, i + 2);
+        PS2_LOGV("[ps2] fs: retrying open %s (attempt %u)\n", path, i + 2);
         f = fopen(path, mode);
     }
 
     if (f == NULL) {
-        printf("[ps2] fs: open failed after retries: %s (%s)\n", path, mode);
+        PS2_LOGV("[ps2] fs: open failed after retries: %s (%s)\n", path, mode);
     }
 
     return f;
@@ -855,7 +856,7 @@ static void fs_ensure_parent_dirs(const char* path)
         if (fs_dir_iter_begin(&it, accum) != 0) {
             /* Directory doesn't exist or can't be read; create it. */
             if (mkdir(accum, 0755) == 0) {
-                printf("[ps2] fs: created missing dir %s\n", accum);
+                PS2_LOGV("[ps2] fs: created missing dir %s\n", accum);
                 ps2_fs_invalidate_parent_of(accum);
             }
         }
@@ -988,14 +989,14 @@ FILE* ps2_fs_fopen(const char* path, const char* mode)
     {
         char remapped[PS2_FS_PATH_MAX];
         if (ps2_save_remap(norm, remapped, sizeof(remapped)) == 0) {
-            printf("[ps2] fs_fopen: remapped '%s' -> '%s'\n", norm, remapped);
+            PS2_LOGV("[ps2] fs_fopen: remapped '%s' -> '%s'\n", norm, remapped);
             if (ps2_fs_canonicalize(remapped, writable) != 0) {
-                printf("[ps2] fs_fopen: canonicalize failed for '%s'\n", remapped);
+                PS2_LOGV("[ps2] fs_fopen: canonicalize failed for '%s'\n", remapped);
                 return NULL;
             }
             return fs_do_open(remapped, mode, writable);
         } else {
-            printf("[ps2] fs_fopen: remap failed for '%s'\n", norm);
+            PS2_LOGV("[ps2] fs_fopen: remap failed for '%s'\n", norm);
         }
     }
 

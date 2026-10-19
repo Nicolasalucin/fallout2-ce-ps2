@@ -28,6 +28,7 @@
 
 #include "combat.h"
 #include "ps2_fs.h"
+#include "ps2_log.h"
 #include "ps2_save.h"
 #include "ps2_time.h"
 
@@ -247,7 +248,7 @@ gzFile compat_gzopen(const char* path, const char* mode)
     }
 
     if (writable && is_mc_path(resolved)) {
-        printf("[ps2] compat_gzopen: writing to MC path %s\n", resolved);
+        PS2_LOGV("[ps2] compat_gzopen: writing to MC path %s\n", resolved);
         ps2_fs_ensure_parent_dirs(resolved);
     }
 
