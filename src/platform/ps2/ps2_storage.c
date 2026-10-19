@@ -14,8 +14,10 @@
  */
 
 #include "ps2_storage.h"
+#include "ps2_debug.h"
 
 #include <dirent.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -23,6 +25,12 @@
 #include <sifrpc.h>
 
 #define PS2_STORAGE_DIR_MAX 64
+
+/* Largest embedded IOP module is well below this (audsrv is ~19 KB, the
+ * storage stack modules are smaller). Only used when the linker ignores the
+ * aligned(16) attribute, i.e. as a safety net. */
+#define PS2_IRX_BOUNCE_SIZE (256 * 1024)
+static unsigned char s_irx_bounce[PS2_IRX_BOUNCE_SIZE] __attribute__((aligned(64)));
 
 static char s_elf_dir[PS2_STORAGE_DIR_MAX];
 static int s_elf_dir_ok;
@@ -42,6 +50,10 @@ extern const unsigned char g_ps2_sio2man_irx[];
 extern const unsigned int g_ps2_sio2man_irx_size;
 extern const unsigned char g_ps2_mx4sio_bd_irx[];
 extern const unsigned int g_ps2_mx4sio_bd_irx_size;
+
+/* Embedded by CMake as well; declared here for the boot alignment audit. */
+extern const unsigned char g_audsrv_irx[];
+extern const unsigned int g_audsrv_irx_size;
 
 /* ------------------------------------------------------- argv0 parsing --- */
 
@@ -145,30 +157,79 @@ static int storage_mass_present(void)
     return storage_device_present("mass:") || storage_device_present("mass0:");
 }
 
-static int storage_exec_irx(const char* name, const unsigned char* data, unsigned int size)
+int ps2_irx_exec(const char* name, const unsigned char* data, unsigned int size)
 {
     int result = 0;
-    int ret = SifExecModuleBuffer((void*)data, size, 0, NULL, &result);
+    const unsigned char* src = data;
+    unsigned int mod16 = (unsigned int)((uintptr_t)data & 0xF);
+    int ret;
+
+    if (mod16 != 0) {
+        if (size > sizeof(s_irx_bounce)) {
+            printf("[ps2] storage: %s too large for IRX bounce buffer (%u bytes)\n", name, size);
+            PS2_LOG("[ps2] irx: %s FAILED (size %u > bounce %u)", name, size, (unsigned int)sizeof(s_irx_bounce));
+            return -1;
+        }
+
+        memcpy(s_irx_bounce, data, size);
+        src = s_irx_bounce;
+        printf("[ps2] storage: %s at %p (mod16=%u), using aligned bounce buffer\n",
+            name, (const void*)data, mod16);
+    }
+
+    ret = SifExecModuleBuffer((void*)src, size, 0, NULL, &result);
 
     if (ret >= 0) {
-        printf("[ps2] storage: %s loaded (id %d, result %d)\n", name, ret, result);
-        return 0;
+        printf("[ps2] storage: %s loaded (id %d, result %d, mod16=%u)\n", name, ret, result, mod16);
+        PS2_LOG("[ps2] irx: %s loaded (id %d, result %d, src_mod16=%u)", name, ret, result, mod16);
+        return ret;
     }
 
     /* The usual failure is "already loaded" (OPL/uLaunchELF preload their
-     * IOP stack); a missing dependency or dead device lands here too. Both
+     * IOP stack); a missing dependency or dead device lands here too. All
      * are non-fatal: the device probe below is the real test. */
-    printf("[ps2] storage: %s not loaded (ret %d, result %d) - continuing\n", name, ret, result);
-    return -1;
+    printf("[ps2] storage: %s not loaded (ret %d, result %d, mod16=%u) - continuing\n",
+        name, ret, result, mod16);
+    PS2_LOG("[ps2] irx: %s not loaded (ret %d, result %d, src_mod16=%u)", name, ret, result, mod16);
+    return ret;
+}
+
+static int storage_exec_irx(const char* name, const unsigned char* data, unsigned int size)
+{
+    return ps2_irx_exec(name, data, size) >= 0 ? 0 : -1;
+}
+
+static void storage_report_irx(const char* name, const unsigned char* data, unsigned int size)
+{
+    unsigned int mod16 = (unsigned int)((uintptr_t)data & 0xF);
+
+    printf("[ps2] irx: %-16s addr=%p size=%u mod16=%u%s\n",
+        name, (const void*)data, size, mod16, mod16 == 0 ? "" : " (NEEDS BOUNCE)");
+    PS2_LOG("[ps2] irx: %-16s addr=0x%08x size=%u mod16=%u%s",
+        name, (unsigned int)(uintptr_t)data, size, mod16, mod16 == 0 ? "" : " (NEEDS BOUNCE)");
+}
+
+void ps2_irx_alignment_report(void)
+{
+    storage_report_irx("audsrv.irx", g_audsrv_irx, g_audsrv_irx_size);
+    storage_report_irx("usbd.irx", g_ps2_usbd_irx, g_ps2_usbd_irx_size);
+    storage_report_irx("usbhdfsd.irx", g_ps2_usbhdfsd_irx, g_ps2_usbhdfsd_irx_size);
+    storage_report_irx("bdm.irx", g_ps2_bdm_irx, g_ps2_bdm_irx_size);
+    storage_report_irx("usbmass_bd.irx", g_ps2_usbmass_bd_irx, g_ps2_usbmass_bd_irx_size);
+    storage_report_irx("bdmfs_fatfs.irx", g_ps2_bdmfs_fatfs_irx, g_ps2_bdmfs_fatfs_irx_size);
+    storage_report_irx("sio2man.irx", g_ps2_sio2man_irx, g_ps2_sio2man_irx_size);
+    storage_report_irx("mx4sio_bd.irx", g_ps2_mx4sio_bd_irx, g_ps2_mx4sio_bd_irx_size);
 }
 
 void ps2_storage_init(const char* argv0)
 {
     printf("[ps2] storage: ELF argv0 = '%s'\n", argv0 != NULL ? argv0 : "");
+    PS2_LOG("[ps2] storage: ELF argv0 = '%s'", argv0 != NULL ? argv0 : "");
 
     storage_extract_elf_dir(argv0);
     if (s_elf_dir_ok) {
         printf("[ps2] storage: ELF directory = '%s'\n", s_elf_dir);
+        PS2_LOG("[ps2] storage: ELF directory = '%s'", s_elf_dir);
     }
 
     /* Loader-managed I/O: OPL mounts USB/MX4SIO/HDD itself, uLaunchELF the
@@ -176,14 +237,17 @@ void ps2_storage_init(const char* argv0)
      * untouched in all of those cases. */
     if (storage_mass_present()) {
         printf("[ps2] storage: mass: already available (loader-managed)\n");
+        PS2_LOG("[ps2] storage: mass: already available (loader-managed)");
         return;
     }
     if (storage_device_present("host:")) {
         printf("[ps2] storage: host: available (development I/O), skipping USB bring-up\n");
+        PS2_LOG("[ps2] storage: host: available (development I/O), skipping USB bring-up");
         return;
     }
 
     printf("[ps2] storage: bringing up USB mass storage\n");
+    PS2_LOG("[ps2] storage: bringing up USB mass storage (no loader-provided modules)");
     sceSifInitRpc(0);
 
     storage_exec_irx("usbd.irx", g_ps2_usbd_irx, g_ps2_usbd_irx_size);
@@ -204,7 +268,9 @@ void ps2_storage_init(const char* argv0)
 
     if (storage_mass_present()) {
         printf("[ps2] storage: mass: ready\n");
+        PS2_LOG("[ps2] storage: mass: ready");
     } else {
         printf("[ps2] storage: mass: not available\n");
+        PS2_LOG("[ps2] storage: mass: not available (game data must be on mc0:/cdrom0:/hdd0:)");
     }
 }

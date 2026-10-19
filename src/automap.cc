@@ -27,6 +27,11 @@
 #include "text_font.h"
 #include "window_manager.h"
 
+#if defined(__PS2__)
+#include "platform/ps2/ps2_debug.h"
+#include "platform/ps2/ps2_mem.h"
+#endif
+
 namespace fallout {
 
 #define AUTOMAP_OFFSET_COUNT (AUTOMAP_MAP_COUNT * ELEVATION_COUNT)
@@ -692,6 +697,10 @@ int automapSaveCurrent()
 
     debugPrint("\nAUTOMAP: Saving AutoMap DB index %d, level %d\n", map, elevation);
 
+#if defined(__PS2__)
+    PS2_LOG("[ps2] automap: save map=%d elev=%d free=%d KB", map, elevation, ps2_mem_free_kb());
+#endif
+
     bool dataBuffersAllocated = false;
     gAutomapEntry.data = (unsigned char*)internal_malloc(11024);
     if (gAutomapEntry.data != nullptr) {
@@ -887,6 +896,10 @@ int automapSaveCurrent()
         internal_free(gAutomapEntry.data);
         internal_free(gAutomapEntry.compressedData);
     }
+
+#if defined(__PS2__)
+    PS2_LOG("[ps2] automap: save map=%d elev=%d done free=%d KB", map, elevation, ps2_mem_free_kb());
+#endif
 
     return 1;
 }

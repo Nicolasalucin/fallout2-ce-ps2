@@ -62,6 +62,11 @@
 #include "word_wrap.h"
 #include "worldmap.h"
 
+#if defined(__PS2__)
+#include "platform/ps2/ps2_debug.h"
+#include "platform/ps2/ps2_mem.h"
+#endif
+
 namespace fallout {
 
 #define LOAD_SAVE_SIGNATURE "FALLOUT SAVE FILE"
@@ -387,6 +392,11 @@ int lsgSaveGame(int mode)
 
     _ls_error_code = 0;
     _patches = settings.system.master_patches_path.c_str();
+
+#if defined(__PS2__)
+    PS2_LOG("[ps2] savegame: save begin mode=%d slot=%d free=%d KB",
+        mode, _slot_cursor + 1, ps2_mem_free_kb());
+#endif
 
     // SFALL: skip slot selection if auto quicksave is enabled
     if (autoQuickSaveSlots) {
@@ -912,6 +922,11 @@ int lsgLoadGame(int mode)
 
     _ls_error_code = 0;
     _patches = settings.system.master_patches_path.c_str();
+
+#if defined(__PS2__)
+    PS2_LOG("[ps2] savegame: load begin mode=%d slot=%d free=%d KB",
+        mode, _slot_cursor + 1, ps2_mem_free_kb());
+#endif
 
     if (mode == LOAD_SAVE_MODE_QUICK && _quick_done) {
         int quickSaveWindowX = (screenGetWidth() - LS_WINDOW_WIDTH) / 2;
@@ -1557,6 +1572,10 @@ static int lsgPerformSaveGame()
     _map_backup_count = -1;
     gameMouseSetCursor(MOUSE_CURSOR_WAIT_PLANET);
 
+#if defined(__PS2__)
+    PS2_LOG("[ps2] savegame: writing slot %d free=%d KB", _slot_cursor + 1, ps2_mem_free_kb());
+#endif
+
     backgroundSoundPause();
 
     snprintf(_gmpath, sizeof(_gmpath), "%s\\%s", _patches, "SAVEGAME");
@@ -1710,6 +1729,12 @@ static int lsgPerformSaveGame()
     backgroundSoundResume();
 
     lsgInvalidateSlotList();
+
+#if defined(__PS2__)
+    PS2_LOG("[ps2] savegame: slot %d written (maps backed up: %d)",
+        _slot_cursor + 1, _map_backup_count);
+#endif
+
     return 0;
 }
 

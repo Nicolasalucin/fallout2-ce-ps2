@@ -48,6 +48,8 @@
 #include "worldmap.h"
 
 #if defined(__PS2__)
+#include "platform/ps2/ps2_debug.h"
+#include "platform/ps2/ps2_mem.h"
 #include "platform/ps2/ps2_perf.h"
 #endif
 
@@ -780,6 +782,7 @@ int mapLoadByName(char* fileName)
     compat_strupr(fileName);
 
 #if defined(__PS2__)
+    PS2_LOG("[ps2] map: load '%s' begin free=%d KB", fileName, ps2_mem_free_kb());
     ps2_perf_map_load_begin();
 #endif
 
@@ -818,6 +821,7 @@ int mapLoadByName(char* fileName)
 
 #if defined(__PS2__)
     ps2_perf_map_load_end(fileName);
+    PS2_LOG("[ps2] map: load '%s' rc=%d free=%d KB", fileName, rc, ps2_mem_free_kb());
 #endif
 
     return rc;
@@ -1503,9 +1507,21 @@ int _map_save_in_game(bool a1)
 
         strcpy(name, gMapHeader.name);
         _strmfe(gMapHeader.name, name, "SAV");
+
+#if defined(__PS2__)
+        PS2_LOG("[ps2] map: save '%s' begin free=%d KB", gMapHeader.name, ps2_mem_free_kb());
+#endif
+
         if (_map_save() == -1) {
+#if defined(__PS2__)
+            PS2_LOG("[ps2] map: save '%s' FAILED", gMapHeader.name);
+#endif
             return -1;
         }
+
+#if defined(__PS2__)
+        PS2_LOG("[ps2] map: save '%s' ok free=%d KB", gMapHeader.name, ps2_mem_free_kb());
+#endif
 
         strcpy(gMapHeader.name, name);
 
