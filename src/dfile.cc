@@ -47,6 +47,109 @@ static int dfileReadCharInternal(DFile* stream);
 static bool dfileReadCompressed(DFile* stream, void* ptr, size_t size);
 static void dfileUngetCompressed(DFile* stream, int ch);
 
+/*
+ * .DAT handle pool (PlayStation 2).
+ *
+ * Every map load opens thousands of streams inside master.dat/critter.dat
+ * (one per FRM, proto and map entry), and closing a stream used to fclose()
+ * the .DAT file itself, so each of those opens cost a host open + seek +
+ * close round trip through SIF. The smoke suite measured ~6900 master.dat
+ * opens for one session: even at a fraction of a millisecond per open that is
+ * pure overhead, and on hardware every open goes through iomanX as well.
+ *
+ * Closed .DAT streams now go back into a small pool keyed by .DAT path and
+ * are reused with a seek, so a whole session keeps a handful of handles. The
+ * pool only ever hands back handles that no open stream is using, which means
+ * every stream still owns its own file position and the read paths stay
+ * unchanged.
+ */
+/* PS2 port: 4 pooled .DAT streams. Each pool slot holds a stdio handle with a
+ * PS2_FS_DAT_BUFSIZE buffer, so slots are heap; the engine keeps at most a
+ * couple of .DAT streams open at once (map/art/proto reads are serialized),
+ * and a slot miss only costs a reopen. */
+#define DFILE_POOL_SLOTS 4
+
+#ifdef __PS2__
+static FILE* s_dfilePoolStreams[DFILE_POOL_SLOTS];
+static char s_dfilePoolPaths[DFILE_POOL_SLOTS][COMPAT_MAX_PATH];
+
+static FILE* dfileStreamAcquire(const char* datPath)
+{
+    int index;
+
+    for (index = 0; index < DFILE_POOL_SLOTS; index++) {
+        if (s_dfilePoolStreams[index] != nullptr
+            && compat_stricmp(s_dfilePoolPaths[index], datPath) == 0) {
+            FILE* stream = s_dfilePoolStreams[index];
+            s_dfilePoolStreams[index] = nullptr;
+            return stream;
+        }
+    }
+
+    return compat_fopen(datPath, "rb");
+}
+
+static void dfileStreamRelease(FILE* stream, const char* datPath)
+{
+    int index;
+
+    if (stream == nullptr) {
+        return;
+    }
+
+    for (index = 0; index < DFILE_POOL_SLOTS; index++) {
+        if (s_dfilePoolStreams[index] == stream) {
+#ifdef PS2_DEV_SMOKE_TEST
+            /* The same handle is already pooled: some path closed a stream
+             * twice. Pooling it once is the only safe answer. */
+            printf("[SMOKE] dfile pool: stream %p released twice\n", (void*)stream);
+#endif
+            return;
+        }
+    }
+
+    for (index = 0; index < DFILE_POOL_SLOTS; index++) {
+        if (s_dfilePoolStreams[index] == nullptr) {
+            s_dfilePoolStreams[index] = stream;
+            snprintf(s_dfilePoolPaths[index], sizeof(s_dfilePoolPaths[index]), "%s", datPath);
+            return;
+        }
+    }
+
+    fclose(stream);
+}
+
+/* Closes the pooled handles of [datPath]. Called when its dbase is closed:
+ * xbases are closed and reopened on mods and when returning to the menu, and
+ * the .DAT file must not be kept alive by stale handles. */
+static void dfileStreamCloseForPath(const char* datPath)
+{
+    int index;
+
+    for (index = 0; index < DFILE_POOL_SLOTS; index++) {
+        if (s_dfilePoolStreams[index] != nullptr
+            && compat_stricmp(s_dfilePoolPaths[index], datPath) == 0) {
+            fclose(s_dfilePoolStreams[index]);
+            s_dfilePoolStreams[index] = nullptr;
+        }
+    }
+}
+#else
+static FILE* dfileStreamAcquire(const char* datPath)
+{
+    return compat_fopen(datPath, "rb");
+}
+
+static void dfileStreamRelease(FILE* stream, const char* datPath)
+{
+    (void)datPath;
+
+    if (stream != nullptr) {
+        fclose(stream);
+    }
+}
+#endif
+
 // Reads .DAT file contents.
 //
 // 0x4E4F58
@@ -204,6 +307,9 @@ bool dbaseClose(DBase* dbase)
     }
 
     if (dbase->path != nullptr) {
+#ifdef __PS2__
+        dfileStreamCloseForPath(dbase->path);
+#endif
         free(dbase->path);
     }
 
@@ -283,7 +389,7 @@ int dfileClose(DFile* stream)
     }
 
     if (stream->stream != nullptr) {
-        fclose(stream->stream);
+        dfileStreamRelease(stream->stream, stream->dbase->path);
     }
 
     // Loop thru open file handles and find previous to remove current handle
@@ -673,7 +779,7 @@ static DFile* dfileOpenInternal(DBase* dbase, const char* filePath, const char* 
         }
 
         if (dfile->stream != nullptr) {
-            fclose(dfile->stream);
+            dfileStreamRelease(dfile->stream, dbase->path);
             dfile->stream = nullptr;
         }
 
@@ -685,7 +791,7 @@ static DFile* dfileOpenInternal(DBase* dbase, const char* filePath, const char* 
     dfile->entry = entry;
 
     // Open stream to .DAT file.
-    dfile->stream = compat_fopen(dbase->path, "rb");
+    dfile->stream = dfileStreamAcquire(dbase->path);
     if (dfile->stream == nullptr) {
         goto err;
     }
