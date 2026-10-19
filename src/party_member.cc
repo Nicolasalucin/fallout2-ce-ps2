@@ -370,6 +370,31 @@ static void partyMemberDescriptionInit(PartyMemberDescription* partyMemberDescri
     }
 }
 
+// NOTE: Party member script ids are derived from the member's pid (item
+// scripts use a running counter instead), which makes them stable across
+// sessions. A map state file saved by a previous session can therefore already
+// contain a script carrying the sid we are about to assign. Two scripts sharing
+// a sid break sid-based lookups - `scriptGetScript` and `scriptRemove` always
+// resolve to the first match - which among other things can wedge the script
+// teardown in `_scr_remove_all`. Drop such stale copies before assigning the
+// sid. Scripts flagged `SCRIPT_FLAG_0x10` are kept on purpose (the dude's
+// script and live party member scripts), so they are never removed here.
+static void _partyMemberFreeStaleSid(int sid)
+{
+    while (true) {
+        Script* script;
+        if (scriptGetScript(sid, &script) == -1) {
+            break;
+        }
+
+        if ((script->flags & SCRIPT_FLAG_0x10) != 0) {
+            break;
+        }
+
+        scriptRemove(sid);
+    }
+}
+
 // partyMemberAdd
 // 0x494378
 int partyMemberAdd(Object* object)
@@ -405,8 +430,22 @@ int partyMemberAdd(Object* object)
         script->flags |= (SCRIPT_FLAG_0x08 | SCRIPT_FLAG_0x10);
         script->ownerId = object->id;
 
-        object->sid = ((object->pid & 0xFFFFFF) + 18000) | (object->sid & 0xFF000000);
-        script->sid = object->sid;
+        int sid = ((object->pid & 0xFFFFFF) + 18000) | (object->sid & 0xFF000000);
+        if (sid != object->sid) {
+            int oldSid = object->sid;
+
+            _partyMemberFreeStaleSid(sid);
+
+            // NOTE: scriptRemove relocates scripts between slots, so the script
+            // pointer cannot be used across the call above.
+            if (scriptGetScript(oldSid, &script) != -1) {
+                Script* existing;
+                if (scriptGetScript(sid, &existing) == -1 || existing == script) {
+                    object->sid = sid;
+                    script->sid = sid;
+                }
+            }
+        }
     }
 
     critterSetTeam(object, 0);
@@ -691,8 +730,22 @@ static int _partyMemberRecoverLoadInstance(PartyMemberListItem* a1)
     memcpy(script, a1->script, sizeof(*script));
 
     int sid = (scriptType << 24) | ((a1->object->pid & 0xFFFFFF) + 18000);
-    a1->object->sid = sid;
-    script->sid = sid;
+    int oldSid = script->sid;
+
+    // NOTE: The recovered script carries the sid from the save game, but a map
+    // state file can hold its own (stale) copy of this party script. Free the
+    // sid first so the two copies do not end up sharing it. Flag the recovered
+    // script as kept so the stale cleanup below cannot remove it.
+    script->flags |= SCRIPT_FLAG_0x10;
+    _partyMemberFreeStaleSid(sid);
+
+    if (scriptGetScript(oldSid, &script) != -1) {
+        Script* existing;
+        if (scriptGetScript(sid, &existing) == -1 || existing == script) {
+            a1->object->sid = sid;
+            script->sid = sid;
+        }
+    }
 
     script->flags &= ~(SCRIPT_FLAG_0x01 | SCRIPT_FLAG_0x04);
 
@@ -1085,8 +1138,21 @@ static int _partyMemberItemRecover(PartyMemberListItem* a1)
 
     memcpy(script, a1->script, sizeof(*script));
 
-    a1->object->sid = _partyMemberItemCount | (SCRIPT_TYPE_ITEM << 24);
-    script->sid = _partyMemberItemCount | (SCRIPT_TYPE_ITEM << 24);
+    int newSid = _partyMemberItemCount | (SCRIPT_TYPE_ITEM << 24);
+    int oldSid = script->sid;
+
+    // NOTE: See _partyMemberFreeStaleSid - a map state file can hold a stale
+    // copy of a party item script which already uses this sid.
+    script->flags |= SCRIPT_FLAG_0x10;
+    _partyMemberFreeStaleSid(newSid);
+
+    if (scriptGetScript(oldSid, &script) != -1) {
+        Script* existing;
+        if (scriptGetScript(newSid, &existing) == -1 || existing == script) {
+            a1->object->sid = newSid;
+            script->sid = newSid;
+        }
+    }
 
     script->program = nullptr;
     script->flags &= ~(SCRIPT_FLAG_0x01 | SCRIPT_FLAG_0x04 | SCRIPT_FLAG_0x08 | SCRIPT_FLAG_0x10);
