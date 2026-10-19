@@ -194,6 +194,16 @@ static const int gLoadSaveFrmIds[LOAD_SAVE_FRM_COUNT] = {
 // 0x5193B8
 static int _slot_cursor = 0;
 
+int lsgGetSlotCursor(void)
+{
+    return _slot_cursor;
+}
+
+void lsgSetSlotCursor(int slot)
+{
+    _slot_cursor = slot;
+}
+
 // 0x5193BC
 static bool _quick_done = false;
 
@@ -2037,28 +2047,39 @@ static int _GetSlotList()
 
     struct dirent* entry;
     while ((entry = readdir(d)) != NULL) {
-        if (strncasecmp(entry->d_name, "FALLOUT2_S", 10) == 0) {
-            int slot = (entry->d_name[10] - '0') * 10 + (entry->d_name[11] - '0') - 1;
-            if (slot >= 0 && slot < 10) {
-                snprintf(path, sizeof(path), "%s%s/SAVE.DAT", save_root, entry->d_name);
-                
-                int fileSize;
-                if (dbGetFileSize(path, &fileSize) == 0) {
-                    _flptr = fileOpen(path, "rb");
-                    if (_flptr != nullptr) {
-                        if (lsgLoadHeaderInSlot(slot) == -1) {
-                            if (_ls_error_code == 1) {
-                                debugPrint("LOADSAVE: ** save file #%d is an older version! **\n", slot);
-                                _LSstatus[slot] = SLOT_STATE_UNSUPPORTED_VERSION;
-                            } else {
-                                debugPrint("LOADSAVE: ** Save file #%d corrupt! **", slot);
-                                _LSstatus[slot] = SLOT_STATE_ERROR;
-                            }
+        /* Slot directories are named FALLOUT2_Sxx on the memory card and
+         * SLOTxx on the host fallback root; accept both. */
+        int slot = -1;
+
+        if (strncasecmp(entry->d_name, "FALLOUT2_S", 10) == 0
+            && isdigit((unsigned char)entry->d_name[10])
+            && isdigit((unsigned char)entry->d_name[11])) {
+            slot = (entry->d_name[10] - '0') * 10 + (entry->d_name[11] - '0') - 1;
+        } else if (strncasecmp(entry->d_name, "SLOT", 4) == 0
+            && isdigit((unsigned char)entry->d_name[4])
+            && isdigit((unsigned char)entry->d_name[5])) {
+            slot = (entry->d_name[4] - '0') * 10 + (entry->d_name[5] - '0') - 1;
+        }
+
+        if (slot >= 0 && slot < 10) {
+            snprintf(path, sizeof(path), "%s%s/SAVE.DAT", save_root, entry->d_name);
+
+            int fileSize;
+            if (dbGetFileSize(path, &fileSize) == 0) {
+                _flptr = fileOpen(path, "rb");
+                if (_flptr != nullptr) {
+                    if (lsgLoadHeaderInSlot(slot) == -1) {
+                        if (_ls_error_code == 1) {
+                            debugPrint("LOADSAVE: ** save file #%d is an older version! **\n", slot);
+                            _LSstatus[slot] = SLOT_STATE_UNSUPPORTED_VERSION;
                         } else {
-                            _LSstatus[slot] = SLOT_STATE_OCCUPIED;
+                            debugPrint("LOADSAVE: ** Save file #%d corrupt! **", slot);
+                            _LSstatus[slot] = SLOT_STATE_ERROR;
                         }
-                        fileClose(_flptr);
+                    } else {
+                        _LSstatus[slot] = SLOT_STATE_OCCUPIED;
                     }
+                    fileClose(_flptr);
                 }
             }
         }

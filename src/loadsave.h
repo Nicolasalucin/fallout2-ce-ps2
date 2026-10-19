@@ -26,6 +26,10 @@ void lsgInit();
 int MapDirErase(const char* path, const char* extension);
 int _MapDirEraseFile_(const char* a1, const char* a2);
 
+/* Slot cursor access for smoke harness (F6). */
+int lsgGetSlotCursor(void);
+void lsgSetSlotCursor(int slot);
+
 } // namespace fallout
 
 #endif /* LOAD_SAVE_GAME_H */
