@@ -526,18 +526,16 @@ int ps2_save_slot_wipe(int slot)
             continue;
         }
         if (snprintf(path, sizeof(path), "%s/%s", resolved, e->d_name) < (int)sizeof(path)) {
-            /* ps2sdk's fileio.h documents fioRemove as broken: it falls
-             * through into "mkdir", so each remove() would replace the file
-             * with an empty directory. Drop that phantom right away. */
-            remove(path);
-            rmdir(path);
+            /* On devices without delete support the erase is recorded instead
+             * of performed (see ps2_fs_remove): the entry is gone as far as
+             * the engine is concerned. */
+            ps2_fs_remove(path);
             removed++;
         }
     }
     closedir(d);
 
-    remove(resolved);
-    rmdir(resolved);
+    ps2_fs_remove(resolved);
 
     /* The wiped names are gone now; a listing cached while resolving them
      * would still return them. */

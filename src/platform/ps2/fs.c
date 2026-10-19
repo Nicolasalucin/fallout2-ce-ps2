@@ -15,6 +15,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h> /* malloc/free for the logical-delete table */
 #include <string.h>
 #include <strings.h> /* strncasecmp */
 #include <unistd.h>
@@ -22,7 +23,10 @@
 #define PS2_FS_MAX_ROOTS 12
 #define PS2_FS_ROOT_MAX 40
 #define PS2_FS_PATH_MAX 256
-#define PS2_FS_DAT_BUFSIZE (64 * 1024)
+/* PS2 port: 32 KB per pooled .DAT stream. The stream buffer is pure heap
+ * (one per open .DAT), and reads from the CD/DVD/host are already served in
+ * large chunks, so a smaller buffer frees memory without hurting throughput. */
+#define PS2_FS_DAT_BUFSIZE (32 * 1024)
 
 /* Fallback chain (after the ELF-relative roots, which ps2_fs_init()
  * prepends dynamically): mass: -> mass0: -> cdrom0: -> hdd0: -> host:. */
@@ -250,6 +254,12 @@ const char* ps2_fs_root_path(int index)
  */
 #define PS2_FS_DIR_CACHE_SLOTS 32
 #define PS2_FS_DIR_CACHE_TTL_MS 4000
+/* PS2 port: 192 KB of static arena for resolved-directory caching. It lives
+ * in .bss, so every byte taken here is taken from the engine heap, but the
+ * arena also decides how often the whole listing cache is dropped: shrinking
+ * it too far trades a few KB of heap for a lot of extra opendir/readdir RPC
+ * traffic, and host: directory storms are exactly what trips the PCSX2
+ * filesystem HLE (see the file header). */
 #define PS2_FS_DIR_CACHE_ARENA (192 * 1024)
 #define PS2_FS_DIR_CACHE_NAME_MAX 255
 
@@ -355,6 +365,161 @@ void ps2_fs_invalidate_parent_of(const char* resolved)
     dir[len] = '\0';
 
     fs_dir_cache_invalidate_dir(dir);
+}
+
+/* --- Logical deletes ----------------------------------------------------
+ *
+ * The PCSX2 "host:" device implements no fileio delete (see
+ * ps2_fs_delete_supported below), yet the engine erases whole directories on
+ * every boot and on every game reset ("MAPS\\*.SAV", "PROTO\\CRITTERS\\*.PRO",
+ * "PROTO\\ITEMS\\*.PRO"). Failing those erases keeps the world state of the
+ * previous session alive: a MAPS\\*.SAV written last run would still shadow
+ * the freshly loaded .MAP when a new game starts.
+ *
+ * Instead of failing the erase, remember the path here and answer later read
+ * resolutions with "not found". Writing (or re-creating) the file clears the
+ * record, so a map saved during this session is fully live again. Directory
+ * listings are deliberately left alone: the bytes are still on the device,
+ * and the engine's wipes walk those listings and re-erase.
+ *
+ * The table only holds the handful of paths the engine wipes, is allocated on
+ * first use and never shrinks.
+ */
+static unsigned long long* s_tombstones;
+static int s_tombstone_count;
+static int s_tombstone_capacity;
+
+/* FNV-1a 64-bit over the lowercased path. The same file always resolves to
+ * the same spelling (readdir() names), and lowercasing keeps the record
+ * working when the erase and the lookup spell the path differently. */
+static unsigned long long fs_tombstone_hash(const char* path)
+{
+    unsigned long long hash = 1469598103934665603ULL;
+
+    for (; *path != '\0'; path++) {
+        unsigned char c = (unsigned char)*path;
+        if (c >= 'A' && c <= 'Z') {
+            c = (unsigned char)(c - 'A' + 'a');
+        }
+        hash ^= (unsigned long long)c;
+        hash *= 1099511628211ULL;
+    }
+
+    return hash;
+}
+
+/* Index of `hash` in the table, or -1. */
+static int fs_tombstone_find(unsigned long long hash)
+{
+    int i;
+
+    for (i = 0; i < s_tombstone_count; i++) {
+        if (s_tombstones[i] == hash) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+/* True when reads of `resolved` must answer "not found". */
+static int fs_tombstoned_path(const char* resolved)
+{
+    if (s_tombstone_count == 0) {
+        return 0;
+    }
+
+    return fs_tombstone_find(fs_tombstone_hash(resolved)) >= 0;
+}
+
+/* Records `resolved` as logically deleted. Returns 0 on success. */
+static int fs_tombstone_add(const char* resolved)
+{
+    unsigned long long hash = fs_tombstone_hash(resolved);
+
+    if (fs_tombstone_find(hash) >= 0) {
+        return 0;
+    }
+
+    if (s_tombstone_count == s_tombstone_capacity) {
+        int capacity = s_tombstone_capacity == 0 ? 16 : s_tombstone_capacity * 2;
+        unsigned long long* table = (unsigned long long*)malloc((size_t)capacity * sizeof(*table));
+
+        if (table == NULL) {
+            printf("[ps2] fs: cannot record logical delete for %s (out of memory)\n", resolved);
+            return -1;
+        }
+
+        if (s_tombstone_count > 0) {
+            memcpy(table, s_tombstones, (size_t)s_tombstone_count * sizeof(*table));
+        }
+
+        free(s_tombstones);
+        s_tombstones = table;
+        s_tombstone_capacity = capacity;
+    }
+
+    s_tombstones[s_tombstone_count++] = hash;
+    PS2_LOGV("[ps2] fs: logically deleted %s\n", resolved);
+    return 0;
+}
+
+/* Public: see ps2_fs.h. */
+int ps2_fs_tombstoned(const char* resolved)
+{
+    if (resolved == NULL) {
+        return 0;
+    }
+
+    return fs_tombstoned_path(resolved);
+}
+
+/* Public: see ps2_fs.h. */
+int ps2_fs_clear_tombstone(const char* resolved)
+{
+    int index;
+
+    if (resolved == NULL) {
+        return 0;
+    }
+
+    index = fs_tombstone_find(fs_tombstone_hash(resolved));
+    if (index < 0) {
+        return 0;
+    }
+
+    /* Order does not matter here; keep the table compact. */
+    s_tombstones[index] = s_tombstones[--s_tombstone_count];
+    return 1;
+}
+
+/* Public: see ps2_fs.h. */
+int ps2_fs_remove(const char* resolved)
+{
+    if (resolved == NULL) {
+        return -1;
+    }
+
+    if (ps2_fs_delete_supported(resolved)) {
+        /* ps2sdk's fileio.h documents fioRemove as broken: its RPC dispatch
+         * lacks a break and falls through into "mkdir", so every successful
+         * remove() leaves an empty directory with the same name. Remove that
+         * phantom as well; rmdir() fails harmlessly when the path is gone. */
+        int rc = remove(resolved);
+        rmdir(resolved);
+        ps2_fs_invalidate_parent_of(resolved);
+        return rc;
+    }
+
+    /* Devices without delete support (the PCSX2 host: filesystem) cannot be
+     * told to forget a file, and issuing the doomed RPC derails the
+     * emulator's IOP state. Record the erase instead. */
+    if (fs_tombstone_add(resolved) != 0) {
+        return -1;
+    }
+
+    ps2_fs_invalidate_parent_of(resolved);
+    return 0;
 }
 
 static unsigned char fs_dirent_kind(const struct dirent* entry)
@@ -592,6 +757,8 @@ void ps2_fs_ensure_parent_dirs(const char* resolved)
         if (fs_dir_iter_begin(&it, accum) != 0) {
             if (mkdir(accum, 0755) == 0) {
                 PS2_LOGV("[ps2] fs: created missing dir %s\n", accum);
+                /* Re-creating a wiped directory revives its path. */
+                ps2_fs_clear_tombstone(accum);
                 /* Invalidate the parent directory's cache so the new
                  * subdirectory becomes visible immediately. */
                 ps2_fs_invalidate_parent_of(accum);
@@ -764,6 +931,13 @@ static int fs_canonicalize_kind(char* path, int allow_missing_last, int* out_kin
         strcpy(dir + dir_len, match);
         dir_len += strlen(match);
 
+        /* A logically deleted file (see ps2_fs_remove) is invisible to
+         * readers even though it is still present on the device. Listings and
+         * write paths (allow_missing_last) stay untouched. */
+        if (found && last && !allow_missing_last && fs_tombstoned_path(dir)) {
+            return -1;
+        }
+
         p = last ? p + comp_len : sep + 1;
     }
 
@@ -857,6 +1031,8 @@ static void fs_ensure_parent_dirs(const char* path)
             /* Directory doesn't exist or can't be read; create it. */
             if (mkdir(accum, 0755) == 0) {
                 PS2_LOGV("[ps2] fs: created missing dir %s\n", accum);
+                /* Re-creating a wiped directory revives its path. */
+                ps2_fs_clear_tombstone(accum);
                 ps2_fs_invalidate_parent_of(accum);
             }
         }
@@ -886,6 +1062,9 @@ static FILE* fs_do_open(const char* path, const char* mode, int writable)
     }
 
     if (f != NULL && writable) {
+        /* Writing revives a logically deleted path (see ps2_fs_remove). */
+        ps2_fs_clear_tombstone(path);
+
         /* The listing of the directory this file lives in is stale now: it
          * was cached while resolving the path, before the file existed (a
          * save written and read back immediately). Every other listing stays
@@ -1050,6 +1229,19 @@ int ps2_fs_directory_exists(const char* path)
 
     closedir(dir);
     return 1;
+}
+
+int ps2_fs_delete_supported(const char* resolved)
+{
+    if (resolved == NULL) {
+        return 0;
+    }
+
+    /* host: (the PCSX2 dev deployment) registers no remove handler: every
+     * remove() ends in "Unknown device 'host'" and the failed RPC shakes the
+     * IOP's RPC bookkeeping. Devices that do implement it (memory card, HDD
+     * install, read-write host filesystems) keep the real syscall. */
+    return strncmp(resolved, "host:", 5) != 0;
 }
 
 int ps2_fs_exists(const char* path)

@@ -67,6 +67,32 @@ FILE* ps2_fs_fopen(const char* path, const char* mode);
 
 /* Existence check without opening the file (compat_access(F_OK)). Resolves
  * `path` the same way ps2_fs_fopen() does but stops there. */
+/**
+ * True when the device hosting [resolved] implements delete-type fileio RPCs.
+ *
+ * False for the PCSX2 "host:" device, where every remove() replies "Unknown
+ * device 'host'". A failing fileio RPC is what upsets the emulator's host
+ * filesystem HLE and derails the IOP RPC state, so callers use this to answer
+ * a doomed erase locally instead of issuing the RPC. The engine treats a
+ * failed erase as non-fatal, and that is already the outcome today.
+ */
+int ps2_fs_delete_supported(const char* resolved);
+
+/* Erases a resolved path (a canonical device path from ps2_fs_resolve()).
+ * Devices with delete support (memory card, HDD) remove the file for real;
+ * devices without it (the PCSX2 "host:" filesystem) record the path as
+ * logically deleted instead, so later read resolutions answer "not found".
+ * Returns 0 on success. */
+int ps2_fs_remove(const char* resolved);
+
+/* True when `resolved` has a logical-delete record (see ps2_fs_remove). */
+int ps2_fs_tombstoned(const char* resolved);
+
+/* Drops the logical-delete record of `resolved`, if any: writing the file or
+ * creating the directory again revives the path. Returns 1 when a record was
+ * dropped. */
+int ps2_fs_clear_tombstone(const char* resolved);
+
 int ps2_fs_exists(const char* path);
 
 /* Directory probe used when the engine registers a directory-backed xbase
@@ -95,6 +121,18 @@ void ps2_fs_invalidate_parent_of(const char* resolved);
 /* Ensures all parent directories of a writable MC path exist.
  * Creates missing components along the path. */
 void ps2_fs_ensure_parent_dirs(const char* resolved);
+
+#ifdef PS2_DEV_SMOKE_TEST
+/* Dev profiling counters: how much directory resolution work the engine
+ * caused. Reported by the F6 smoke suite so VFS/DAT changes can be told
+ * apart from rendering work. */
+extern unsigned int ps2_fs_stat_fopen_calls;
+extern unsigned int ps2_fs_stat_canonicalize_calls;
+extern unsigned int ps2_fs_stat_dir_cache_hits;
+extern unsigned int ps2_fs_stat_dir_scans;
+
+void ps2_fs_stat_reset(void);
+#endif
 
 #ifdef __cplusplus
 }

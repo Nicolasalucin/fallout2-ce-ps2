@@ -208,6 +208,16 @@ int compat_mkdir(const char* path)
 
     int rc = mkdir(resolved, 0755);
 
+    /* The directory can still be on a device without delete support while its
+     * logical-delete record says it is gone (a wiped save slot, for
+     * instance): creating it again revives the path. */
+    if (rc != 0 && ps2_fs_tombstoned(resolved)) {
+        rc = 0;
+    }
+    if (rc == 0) {
+        ps2_fs_clear_tombstone(resolved);
+    }
+
     /* Creating a save-slot directory materializes the PS2 browser metadata
      * (icon.sys + icon.icn) inside it. */
     ps2_save_slot_ensure_meta(resolved);
@@ -253,6 +263,11 @@ gzFile compat_gzopen(const char* path, const char* mode)
     }
 
     gzFile stream = gzopen(resolved, mode);
+
+    if (stream != nullptr && writable) {
+        /* Writing revives a logically deleted path (see ps2_fs_remove). */
+        ps2_fs_clear_tombstone(resolved);
+    }
 
     /* Same transient memory-card window as in the C stdio layer (fs.c):
      * retry before giving up. The path was just resolved through a
@@ -309,21 +324,20 @@ char* compat_gzgets(gzFile stream, char* buffer, int maxCount)
 int compat_remove(const char* path)
 {
     char resolved[COMPAT_MAX_PATH];
-    if (ps2_fs_resolve(path, resolved, sizeof(resolved), 0) != 0) {
-        return -1;
+    if (ps2_fs_resolve(path, resolved, sizeof(resolved), 0) == 0) {
+        return ps2_fs_remove(resolved);
     }
 
-    /* ps2sdk's fileio.h documents fioRemove as broken: its RPC dispatch
-     * lacks a break and falls through into "mkdir", so every successful
-     * remove() leaves an empty directory with the same name. Remove that
-     * phantom as well; rmdir() fails harmlessly when the path is gone. */
-    int rc = remove(resolved);
-    rmdir(resolved);
+    /* Readers no longer see the file. Devices without delete support record
+     * the erase instead of performing it (see ps2_fs_remove), so a repeated
+     * erase - the engine walks directory listings which deliberately keep
+     * showing logically deleted files - must keep reporting success. */
+    if (ps2_fs_resolve(path, resolved, sizeof(resolved), 1) == 0
+        && ps2_fs_tombstoned(resolved)) {
+        return 0;
+    }
 
-    /* The parent listing still names the removed file. */
-    ps2_fs_invalidate_parent_of(resolved);
-
-    return rc;
+    return -1;
 }
 
 /* Copy fallback for compat_rename().
