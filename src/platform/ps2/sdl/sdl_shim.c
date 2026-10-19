@@ -413,6 +413,19 @@ int SDL_SetPaletteColors(SDL_Palette* palette, const SDL_Color* colors, int firs
     if (firstcolor + ncolors <= 256) {
         memcpy(&s_game_palette[firstcolor], colors, (size_t)ncolors * sizeof(SDL_Color));
         s_palette_dirty = 1;
+
+        {
+            /* Palette timeline for the PS2 CLUT diagnostics: a checksum of
+             * the resulting mirror plus the updated range lets the host
+             * correlate "who changed the palette" with the frame captures. */
+            const unsigned char* bytes = (const unsigned char*)s_game_palette;
+            unsigned int crc = 2166136261u;
+            for (int i = 0; i < 768; i++) {
+                crc ^= bytes[i];
+                crc *= 16777619u;
+            }
+            ps2_video_palette_note("set", firstcolor, ncolors, crc);
+        }
     }
 
     return 0;

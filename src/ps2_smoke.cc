@@ -46,6 +46,7 @@ extern "C" {
 #include "platform/ps2/ps2_perf.h"
 #include "platform/ps2/ps2_save.h"
 #include "platform/ps2/ps2_time.h"
+#include "platform/ps2/ps2_video.h"
 #include "platform/ps2/sdl/ps2_sdl_internal.h"
 
 #include "character_selector.h"
@@ -1572,6 +1573,13 @@ static bool smoke_act_tour(void)
 
         smoke_step_begin2(mapName, SMOKE_SLOW_STEP_TIMEOUT_MS);
 
+        if (i == 0) {
+            /* Map transition capture pair (reference for palette/CLUT
+             * coherence): the presentation right after the load must show
+             * the map palette, not the previous map's. */
+            ps2_video_capture("map_before", 1, 1);
+        }
+
         ps2_perf_frame_reset();
 
         /* Reproduce the engine's own map-change sequence: mapNewMap() frees
@@ -1598,6 +1606,10 @@ static bool smoke_act_tour(void)
 
         objectSetLocation(gDude, gMapHeader.enteringTile, gMapHeader.enteringElevation, nullptr);
         tileWindowRefresh();
+
+        if (i == 0) {
+            ps2_video_capture("map_after", 2, 1);
+        }
 
         if (!smoke_wait_ms(6000)) {
             break;
@@ -1697,6 +1709,10 @@ int ps2_smoke_main(void)
     s_run_start = ps2_time_ms();
     s_mem_next_report = s_run_start + SMOKE_MEM_PERIOD_MS;
     ps2_fs_stat_reset();
+
+    /* Palette timeline + frame captures are opt-in diagnostics: they stay
+     * silent in a normal game session and are only enabled here. */
+    ps2_video_diagnostics(1);
 
     SMOKE_LOG("suite: start (%s)", ps2_mem_get_usage_kb() > 0 ? "ps2 dev smoke" : "ps2 dev smoke");
     smoke_select_parts();

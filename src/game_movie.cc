@@ -21,6 +21,10 @@
 #include "touch.h"
 #include "window_manager.h"
 
+#if defined(__PS2__)
+#include "platform/ps2/ps2_video.h"
+#endif
+
 namespace fallout {
 
 #define GAME_MOVIE_WINDOW_WIDTH 640
@@ -240,6 +244,12 @@ int gameMoviePlay(int movie, int flags)
 
     movieEffectsLoad(movieFilePath);
 
+#if defined(__PS2__)
+    /* Palette/CLUT validation: grab movie frames at the start and every 50
+     * presents so the host can compare them with the restored game state. */
+    ps2_video_capture("mve_during", 5, 50);
+#endif
+
     _zero_vid_mem();
     _movieRun(win, movieFilePath);
 
@@ -306,6 +316,13 @@ int gameMoviePlay(int movie, int flags)
         paletteFadeTo(_cmap);
         gGameMovieFaded = false;
     }
+
+#if defined(__PS2__)
+    /* Stop the capture sequence (short movies may not consume all frames)
+     * and store the first frames presented with the restored palette. */
+    ps2_video_capture(NULL, 0, 0);
+    ps2_video_capture("mve_after", 2, 1);
+#endif
 
     gGameMovieIsPlaying = false;
     return 0;

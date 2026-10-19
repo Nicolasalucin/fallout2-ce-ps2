@@ -1,28 +1,23 @@
 /*
- * Video backend for the Fallout PS2 port: GS hardware-indexed rendering.
+ * Video backend for the Fallout 2 PS2 port: GS hardware-indexed rendering.
  *
- * Pipeline per frame (fast path):
+ * Pipeline per frame (Option A - matches Fallout 1):
  *
- *   engine 8bpp 640x480 buffer (palette indices)
- *        |  gsKit_texture_upload (307 KB DMA to VRAM, writeback-flushed)
+ *   engine 8bpp 640x480 buffer
+ *        |  CPU palette lookup through s_palette (LUT, ~1 ms on the EE)
  *        v
- *   GS VRAM: T8 texture (TBW 10) + 256-entry CT32 CLUT
- *        |  full-screen textured quad, palette lookup in the GS
+ *   s_fb_rgba: CT32 640x480 (1.2 MB, 64-byte aligned)
+ *        |  gsKit_texture_upload (DMA to VRAM, writeback-flushed)
+ *        v
+ *   GS VRAM: CT32 texture (no CLUT at all)
+ *        |  full-screen textured quad
  *        v
  *   framebuffer flip on vsync -> NTSC 640x448 @ 60 Hz interlaced
  *
- * The GS does the palette lookup, so the EE neither converts 307K pixels per
- * frame nor moves the old 1.2 MB RGBA buffer over the GIF. GS_FILTER_NEAREST
- * handles the 480->448 downscale without resampling artifacts.
- *
- * The CLUT is 32-bit (CT32 entries in CSM2 storage) instead of the common
- * 16-bit CSM1 form: CSM2 keeps the engine palette's 8-bit channels intact and
- * never makes a palette slot transparent behind the engine's back.
- *
- * Fallback path: the OSK composites RGBA pixels, so while it is open the
- * frame is built with a CT32 texture (s_fb_rgba + s_texture32). Both are
- * created on demand and released when the keyboard closes, so normal play
- * never pays for them. s_palette doubles as the CPU lookup table there.
+ * Doing the palette lookup on the EE (Option A) removes the GS CLUT,
+ * the CSM1 swizzle question and the T8 TBW pitfalls from the equation.
+ * The texture uses GS_FILTER_NEAREST for the 480->448 downscale; with a
+ * CT32 texture a linear filter would now also be color-correct if wanted.
  */
 
 #include "ps2_video.h"
@@ -32,8 +27,8 @@
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <gsKit.h>
 #include <dmaKit.h>
@@ -54,97 +49,17 @@ static GSTEXTURE s_texture;
 static u32 s_phase_ms[4];
 static u32 s_phase_count;
 
-void ps2_video_debug_print_phases(void)
-{
-    printf("[ps2] present phases x%u: upload=%u ms, queue=%u ms, exec=%u ms, flip=%u ms\n",
-        (unsigned)s_phase_count, (unsigned)s_phase_ms[0], (unsigned)s_phase_ms[1],
-        (unsigned)s_phase_ms[2], (unsigned)s_phase_ms[3]);
-    s_phase_ms[0] = s_phase_ms[1] = s_phase_ms[2] = s_phase_ms[3] = 0;
-    s_phase_count = 0;
-}
-
 /* Palette LUT in GS CT32 style (0xAABBGGRR), rebuilt from the engine
  * palette by ps2_video_set_palette(). Used as the CPU lookup table. */
 static u32 s_palette[256] __attribute__((aligned(64)));
 
 /* Staging buffer used only if the engine ever presents a non-640x480 or
- * non-640-pitch surface (never happens today, kept as insurance).
- * 307 KB scratch for surfaces whose geometry does not match the screen.
- * Allocated on first use: every byte of static data shrinks the EE heap by
- * the same amount. */
-static u8* s_staging;
-static u8* s_staging_alloc;
+ * non-640-pitch surface (never happens today, kept as insurance). */
+static u8 s_staging[PS2_SCR_W * PS2_SCR_H] __attribute__((aligned(64)));
 
-/* Fast path: the 8-bit index frame is uploaded as a T8 (8-bit paletted)
- * texture and the GS performs the palette lookup through a 256-entry CT32
- * CLUT. The EE neither converts 307K pixels per frame nor moves 1.2 MB over
- * the GIF, and no RGBA frame buffer has to live in RAM. */
-static GSTEXTURE s_texture;
-
-/* On-screen keyboard path: the OSK composites RGBA pixels, so it needs a real
- * CT32 frame. Both the EE frame (1.2 MB) and its GS texture (1.2 MB of VRAM)
- * are created when the keyboard opens and released when it closes, which
- * keeps them out of normal play entirely. */
-static GSTEXTURE s_texture32;
-static u32* s_fb_rgba;
-static u32* s_fb_rgba_alloc;
-
-/* Lazily create the 64-byte aligned 8-bit staging buffer (one screen).
- * Returns it, or NULL when memory is exhausted. */
-static u8* staging_ensure(void)
-{
-    const size_t stagingSize = (size_t)PS2_SCR_W * PS2_SCR_H;
-
-    if (s_staging == NULL) {
-        s_staging_alloc = (u8*)malloc(stagingSize + 64);
-        if (s_staging_alloc == NULL) {
-            return NULL;
-        }
-        s_staging = (u8*)(((uintptr_t)s_staging_alloc + 63u) & ~(uintptr_t)63u);
-    }
-
-    return s_staging;
-}
-
-/* Lazily create the RGBA frame and its GS texture for the OSK path.
- * Returns 1 when both are ready. */
-static int video32_ensure(void)
-{
-    if (s_fb_rgba == NULL) {
-        s_fb_rgba_alloc = (u32*)malloc((size_t)PS2_SCR_W * PS2_SCR_H * 4 + 64);
-        if (s_fb_rgba_alloc == NULL) {
-            return 0;
-        }
-        s_fb_rgba = (u32*)(((uintptr_t)s_fb_rgba_alloc + 63u) & ~(uintptr_t)63u);
-    }
-
-    if (s_texture32.Vram == 0) {
-        s_texture32.Width = PS2_SCR_W;
-        s_texture32.Height = PS2_SCR_H;
-        s_texture32.PSM = GS_PSM_CT32;
-        s_texture32.Filter = GS_FILTER_NEAREST;
-        gsKit_setup_tbw(&s_texture32);
-        s_texture32.Vram = gsKit_vram_alloc(s_gs,
-            gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_CT32), GS_VRAM_BLOCKSIZE_256);
-        if (s_texture32.Vram == 0) {
-            free(s_fb_rgba_alloc);
-            s_fb_rgba_alloc = NULL;
-            s_fb_rgba = NULL;
-            return 0;
-        }
-    }
-
-    return 1;
-}
-
-/* The VRAM block is kept (gsKit has no per-block free and the OSK only opens
- * from menus); the 1.2 MB EE frame goes back to the engine heap. */
-static void video32_release(void)
-{
-    free(s_fb_rgba_alloc);
-    s_fb_rgba_alloc = NULL;
-    s_fb_rgba = NULL;
-}
+/* CT32 framebuffer uploaded to the GS every frame: index -> palette RGBA.
+ * 1.2 MB in BSS, 64-byte aligned for the GIF DMAC. */
+static u32 s_fb_rgba[PS2_SCR_W * PS2_SCR_H] __attribute__((aligned(64)));
 
 void ps2_video_init(void)
 {
@@ -157,12 +72,7 @@ void ps2_video_init(void)
         D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
     dmaKit_chan_init(DMA_CHANNEL_GIF);
 
-    /* PS2 port: gsKit's default render queues are 1 MB (oneshot) + 256 KB
-     * (persistent) *per buffer*, i.e. ~2.5 MB of EE heap with double
-     * buffering. This port draws a handful of primitives per frame (a clear
-     * plus one screen quad; the OSK adds a few dozen), so small queues are
-     * plenty and the freed heap goes to the engine. */
-    s_gs = gsKit_init_global_custom(32 * 1024, 16 * 1024);
+    s_gs = gsKit_init_global();
 
     s_gs->Mode = GS_MODE_NTSC;
     s_gs->Interlace = GS_INTERLACED;
@@ -184,37 +94,26 @@ void ps2_video_init(void)
     memset(&s_texture, 0, sizeof(s_texture));
     s_texture.Width = PS2_SCR_W;
     s_texture.Height = PS2_SCR_H;
-    s_texture.PSM = GS_PSM_T8;
-    s_texture.ClutPSM = GS_PSM_CT32;
-    s_texture.Clut = s_palette;
-    /* CSM2: the CLUT in VRAM holds 32-bit entries, matching the CT32 palette
-     * uploaded above. With CSM1 the GS reads the same bytes as 16-bit
-     * entries; only palette slots that happen to be white survive and the
-     * textured parts of the screen come out as colour noise. */
-    s_texture.ClutStorageMode = GS_CLUT_STORAGE_CSM2;
-    /* 480->448 downscale: NEAREST avoids resampling artifacts. */
+    s_texture.PSM = GS_PSM_CT32;
+    /* 480->448 downscale: NEAREST avoids resampling artifacts. With CT32
+     * the data is real color, so a linear filter would be correct too. */
     s_texture.Filter = GS_FILTER_NEAREST;
     gsKit_setup_tbw(&s_texture);
     s_texture.Vram = gsKit_vram_alloc(s_gs,
-        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_T8), GS_VRAM_BLOCKSIZE_256);
-    s_texture.VramClut = gsKit_vram_alloc(s_gs,
-        gsKit_texture_size(16, 16, GS_PSM_CT32), GS_VRAM_BLOCKSIZE_256);
+        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_CT32), GS_VRAM_BLOCKSIZE_256);
+    s_texture.Mem = (u32*)s_fb_rgba;
 
-    printf("[ps2] video: NTSC 640x448 60Hz, T8 tex @ %08x (TBW %u), CT32 CLUT @ %08x\n",
-        (unsigned)s_texture.Vram, (unsigned)s_texture.TBW, (unsigned)s_texture.VramClut);
+    printf("[ps2] video: NTSC 640x448 60Hz, CT32 tex @ %08x (TBW %u), CPU palette LUT\n",
+        (unsigned)s_texture.Vram, (unsigned)s_texture.TBW);
 }
 
 void ps2_video_shutdown(void)
 {
     /* The engine exits right after this; the GS state is not reused. */
     s_video_inited = 0;
-
-    video32_release();
-
-    free(s_staging_alloc);
-    s_staging_alloc = NULL;
-    s_staging = NULL;
 }
+
+static void capture_maybe_dump(const u8* indices, int osk);
 
 void ps2_video_present(const void* pixels, int width, int height, int pitch)
 {
@@ -235,20 +134,14 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
     const u8* indices;
     if (width != PS2_SCR_W || height != PS2_SCR_H || pitch != PS2_SCR_W) {
         /* Normalize exotic surfaces into the staging buffer. */
-        const size_t stagingSize = (size_t)PS2_SCR_W * PS2_SCR_H;
         int rows = height < PS2_SCR_H ? height : PS2_SCR_H;
         int cols = width < PS2_SCR_W ? width : PS2_SCR_W;
-
-        indices = staging_ensure();
-        if (indices == NULL) {
-            return;
-        }
-
-        memset(s_staging, 0, stagingSize);
+        memset(s_staging, 0, sizeof(s_staging));
         for (int y = 0; y < rows; y++) {
             memcpy(s_staging + (size_t)y * PS2_SCR_W,
                 (const u8*)pixels + (size_t)y * pitch, (size_t)cols);
         }
+        indices = s_staging;
     } else {
         indices = (const u8*)pixels;
     }
@@ -256,56 +149,36 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
     {
         u32 t0 = ps2_time_ms();
         u32 t1, t2, t3, t4;
-        GSTEXTURE* tex;
-        int osk = ps2_osk_is_open();
 
-        if (osk && video32_ensure()) {
-            /* On-screen keyboard: the OSK blends real colors, so the frame is
-             * built as RGBA on the EE and uploaded as CT32. */
-            u32* dst = s_fb_rgba;
-            const u32* lut = s_palette;
-            for (int i = 0; i < PS2_SCR_W * PS2_SCR_H; i++) {
-                dst[i] = lut[indices[i]];
-            }
+        /* Dev capture: dump the frame that is about to be presented (the
+         * palette snapshot is taken right here, so the pair is coherent). */
+        capture_maybe_dump(indices, ps2_osk_is_open());
 
+        /* Paletted -> CT32 on the EE (Option A): one LUT read per pixel.
+         * s_palette is already in GS CT32 byte order (A B G R), so every
+         * entry can be stored verbatim. No GS CLUT involved. */
+        u32* dst = s_fb_rgba;
+        const u32* lut = s_palette;
+        for (int i = 0; i < PS2_SCR_W * PS2_SCR_H; i++) {
+            dst[i] = lut[indices[i]];
+        }
+
+        /* F8: composite the on-screen keyboard over the freshly built
+         * frame (engine buffers untouched; no-op while closed). */
+        if (ps2_osk_is_open()) {
             ps2_osk_render(s_fb_rgba, PS2_SCR_W, PS2_SCR_H);
-
-            s_texture32.Mem = (u32*)s_fb_rgba;
-            tex = &s_texture32;
-        } else {
-            /* Normal path: upload the 8-bit indices and let the GS look the
-             * palette up in its CLUT. No per-pixel work on the EE and 307 KB
-             * per frame instead of 1.2 MB. */
-            if (((uintptr_t)indices & 15u) != 0) {
-                /* GIF DMA wants a 16-byte aligned source. The engine's screen
-                 * is 64-byte aligned today, so this is insurance. */
-                u8* staged = staging_ensure();
-                if (staged == NULL) {
-                    return;
-                }
-                memcpy(staged, indices, (size_t)PS2_SCR_W * PS2_SCR_H);
-                indices = staged;
-            }
-
-            s_texture.Mem = (u32*)indices;
-            s_texture.Clut = s_palette;
-            tex = &s_texture;
         }
 
-        if (!osk && s_fb_rgba != NULL) {
-            /* Keyboard closed: hand its 1.2 MB frame back to the engine
-             * heap (the transfer of the frame it was used for is done). */
-            video32_release();
-        }
+        s_texture.Mem = (u32*)s_fb_rgba;
 
-        /* Write back the frame before the GIF DMAC fetches it (cached RAM;
-         * gsKit also flushes inside gsKit_texture_upload()). */
+        /* Write back the freshly built frame before the GIF DMAC fetches it
+         * (cached RAM; gsKit also flushes inside gsKit_texture_send()). */
         FlushCache(0);
-        gsKit_texture_upload(s_gs, tex);
+        gsKit_texture_upload(s_gs, &s_texture);
         t1 = ps2_time_ms();
 
         gsKit_clear(s_gs, GS_SETREG_RGBAQ(0, 0, 0, 0, 0));
-        gsKit_prim_sprite_texture_3d(s_gs, tex,
+        gsKit_prim_sprite_texture_3d(s_gs, &s_texture,
             0.0f, 0.0f, 1, 0.0f, 0.0f,
             (float)PS2_OUT_W, (float)PS2_OUT_H, 1, (float)PS2_SCR_W, (float)PS2_SCR_H,
             GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0));
@@ -335,18 +208,19 @@ void ps2_video_set_palette(const void* rgba_colors)
 
     for (int i = 0; i < 256; i++) {
         u32 color = src[i];
-
-        /* The engine's palette carries no usable alpha (the screen buffer is
-         * an opaque software composite) and a CSM2 CLUT texel whose alpha is
-         * below 0x80 is dropped by the GS, so every entry is written opaque.
-         * 0x80 is also the GS's clamp for a 1.0 alpha. */
-        s_palette[i] = (color & 0x00FFFFFF) | 0x80000000u;
+        u32 alpha = (color >> 24) & 0xFF;
+        if (alpha > 0x80) {
+            /* The GS clamps alpha at 0x80 (1.0). */
+            alpha = 0x80;
+        }
+        s_palette[i] = (color & 0x00FFFFFF) | (alpha << 24);
     }
 }
 
-/* Boot self-test pattern helpers. The base pattern is only rebuilt when the
- * palette rotation changes (every 30 frames); per-frame work is limited to
- * repainting the two 8px strips used by the moving column. */
+/* ---------------------------------------------------------------------- */
+/* Boot self-test pattern helpers                                         */
+/* ---------------------------------------------------------------------- */
+
 static u8 selftest_pixel(int x, int y, int rotation)
 {
     if (x < 2 || x >= PS2_SCR_W - 2 || y < 2 || y >= PS2_SCR_H - 2) {
@@ -400,19 +274,11 @@ static void selftest_column(u8* pattern, int col)
  */
 void ps2_video_selftest(void)
 {
-    /* Heap, not BSS: the self-test runs at most once per boot, and 300 KB of
-     * static data would otherwise be subtracted from the engine heap for the
-     * whole session (every byte of .bss shrinks the EE heap). */
-    u8* pattern = (u8*)malloc((size_t)PS2_SCR_W * PS2_SCR_H);
+    static u8 pattern[PS2_SCR_W * PS2_SCR_H] __attribute__((aligned(64)));
     static u32 test_palette[256];
     int last_col = 0;
     int last_rotation = -1;
     int rotation;
-
-    if (pattern == NULL) {
-        printf("[ps2] selftest: skipped (out of memory)\n");
-        return;
-    }
 
     ps2_video_init();
 
@@ -543,8 +409,8 @@ void ps2_video_selftest(void)
     }
 
     /* Input window: keep presenting at 60 Hz while pumping events so the pad
-     * layer is polled and its transitions are logged. Bring-up harness only
-     * (PS2_DEV_BOOT_SELFTEST builds): normal boots go straight to the game. */
+     * layer is polled and its transitions are logged. Temporary F3 harness;
+     * F8 replaces this with the real boot/mod menu. */
     {
         u32 t0 = ps2_time_ms();
 
@@ -562,9 +428,196 @@ void ps2_video_selftest(void)
         }
         printf("[ps2] selftest: input window done (%u ms)\n", (unsigned)(ps2_time_ms() - t0));
     }
+}
 
-    /* The last probe uploaded from `pattern`; drop the source pointer before
-     * releasing the scratch (the next present sets it again). */
-    s_texture.Mem = NULL;
-    free(pattern);
+/* ---------------------------------------------------------------------- */
+/* Palette/CLUT diagnostics and frame capture (development diagnostics)    */
+/* ---------------------------------------------------------------------- */
+
+static unsigned int s_palette_generation;
+static int s_palette_trace_on;
+static unsigned int s_palette_trace_last_ms;
+static unsigned int s_palette_trace_last_crc;
+static int s_palette_trace_skipped;
+
+#define PS2_CAPTURE_NAME_MAX 64
+#define PS2_CAPTURE_ROOT_MAX 64
+
+static char s_capture_name[PS2_CAPTURE_NAME_MAX];
+static char s_capture_root[PS2_CAPTURE_ROOT_MAX];
+static int s_capture_remaining;
+static int s_capture_stride;
+static int s_capture_wait;
+static int s_capture_index;
+
+static void capture_maybe_dump(const u8* indices, int osk);
+
+void ps2_video_debug_print_phases(void)
+{
+    printf("[ps2] present phases x%u: upload=%u ms, queue=%u ms, exec=%u ms, flip=%u ms\n",
+        (unsigned)s_phase_count, (unsigned)s_phase_ms[0], (unsigned)s_phase_ms[1],
+        (unsigned)s_phase_ms[2], (unsigned)s_phase_ms[3]);
+    s_phase_ms[0] = s_phase_ms[1] = s_phase_ms[2] = s_phase_ms[3] = 0;
+    s_phase_count = 0;
+}
+
+void ps2_video_diagnostics(int enabled)
+{
+    s_palette_trace_on = enabled != 0;
+    s_palette_trace_last_ms = 0;
+    s_palette_trace_last_crc = 0;
+    s_palette_trace_skipped = 0;
+}
+
+void ps2_video_palette_note(const char* what, int first, int count, unsigned int crc)
+{
+    unsigned int now;
+
+    s_palette_generation++;
+
+    if (!s_palette_trace_on) {
+        return;
+    }
+
+    now = ps2_time_ms();
+
+    /* A fade rewrites the palette every frame and a movie rewrites ranges
+     * per frame. Keep the timeline readable: fold identical states and cap
+     * the rate at ~50 lines/s, reporting how many updates were folded. */
+    if (crc == s_palette_trace_last_crc && (now - s_palette_trace_last_ms) < 1000) {
+        s_palette_trace_skipped++;
+        return;
+    }
+
+    if (s_palette_trace_last_ms != 0 && (now - s_palette_trace_last_ms) < 20) {
+        s_palette_trace_skipped++;
+        return;
+    }
+
+    printf("[ps2pal] %u ms %s first=%d n=%d gen=%u crc=%08x skipped=%d\n",
+        now, what != NULL ? what : "set", first, count, s_palette_generation,
+        crc, s_palette_trace_skipped);
+
+    s_palette_trace_last_ms = now;
+    s_palette_trace_last_crc = crc;
+    s_palette_trace_skipped = 0;
+}
+
+/* Pick the first writable capture root and create it if needed. */
+static int capture_root_ensure(void)
+{
+    static const char* const candidates[] = {
+        "host:/caps/",          /* PCSX2 host filesystem (development) */
+        "mass:/FALLOUT2/caps/", /* USB stick / MX4SIO */
+        "mc0:/FALLOUT2/caps/",  /* memory card */
+    };
+
+    if (s_capture_root[0] != '\0') {
+        return 1;
+    }
+
+    for (int i = 0; i < (int)(sizeof(candidates) / sizeof(candidates[0])); i++) {
+        char dir[PS2_CAPTURE_ROOT_MAX];
+        char probe[PS2_CAPTURE_ROOT_MAX + 16];
+        size_t len;
+        FILE* f;
+
+        snprintf(dir, sizeof(dir), "%s", candidates[i]);
+        len = strlen(dir);
+        if (len > 0 && dir[len - 1] == '/') {
+            dir[len - 1] = '\0';
+        }
+
+        mkdir(dir, 0777);
+
+        snprintf(probe, sizeof(probe), "%s/probe.tmp", dir);
+        f = fopen(probe, "wb");
+        if (f == NULL) {
+            continue;
+        }
+        fclose(f);
+        remove(probe);
+
+        snprintf(s_capture_root, sizeof(s_capture_root), "%s/", dir);
+        printf("[ps2pal] capture root: %s\n", s_capture_root);
+        return 1;
+    }
+
+    printf("[ps2pal] capture: no writable root (host:, mass:, mc0:)\n");
+    return 0;
+}
+
+static void capture_write(const char* suffix, const void* data, size_t size)
+{
+    char path[PS2_CAPTURE_ROOT_MAX + PS2_CAPTURE_NAME_MAX + 32];
+    FILE* f;
+
+    snprintf(path, sizeof(path), "%s%s_%d.%s", s_capture_root, s_capture_name, s_capture_index, suffix);
+    f = fopen(path, "wb");
+    if (f == NULL) {
+        return;
+    }
+    if (data != NULL && size != 0) {
+        fwrite(data, 1, size, f);
+    }
+    fclose(f);
+}
+
+static void capture_maybe_dump(const u8* indices, int osk)
+{
+    char meta[160];
+    int length;
+
+    if (s_capture_remaining <= 0 || indices == NULL) {
+        return;
+    }
+
+    if (s_capture_wait > 0) {
+        s_capture_wait--;
+        return;
+    }
+
+    if (!capture_root_ensure()) {
+        s_capture_remaining = 0;
+        return;
+    }
+
+    capture_write("idx", indices, (size_t)PS2_SCR_W * PS2_SCR_H);
+    capture_write("pal", s_palette, sizeof(s_palette));
+
+    length = snprintf(meta, sizeof(meta),
+        "name=%s index=%d osk=%d gen=%u vram=%08x\n",
+        s_capture_name, s_capture_index, osk, s_palette_generation,
+        (unsigned)s_texture.Vram);
+    capture_write("txt", meta, (size_t)length);
+
+    printf("[ps2pal] capture %s_%d (osk=%d gen=%u)\n",
+        s_capture_name, s_capture_index, osk, s_palette_generation);
+
+    s_capture_index++;
+    s_capture_remaining--;
+    s_capture_wait = s_capture_stride - 1;
+}
+
+int ps2_video_capture(const char* name, int count, int stride)
+{
+    /* Any request replaces (and therefore cancels) the pending sequence. */
+    s_capture_remaining = 0;
+
+    if (name == NULL || name[0] == '\0' || count <= 0) {
+        return -1;
+    }
+
+    if (!s_palette_trace_on) {
+        /* Captures are part of the opt-in diagnostics; a normal game session
+         * must not write 300 KB files behind the player's back. */
+        return -1;
+    }
+
+    snprintf(s_capture_name, sizeof(s_capture_name), "%s", name);
+    s_capture_remaining = count;
+    s_capture_stride = stride > 0 ? stride : 1;
+    s_capture_wait = 0;
+    s_capture_index = 0;
+    return 0;
 }
