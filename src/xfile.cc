@@ -298,6 +298,22 @@ int xfileWriteString(const char* string, XFile* stream)
 // 0x4DF44C
 size_t xfileRead(void* ptr, size_t size, size_t count, XFile* stream)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    if (ptr == nullptr) {
+        /* Dev canary: the engine asked to read into a NULL buffer, and the
+         * assertion below aborts the game. Log who is asking, how much, and
+         * which .DAT entry it is about (when the stream is DAT-backed). */
+        printf("[SMOKE] xfileRead NULL buffer: total=%u size=%u count=%u type=%d entry=%s ra=0x%08X\n",
+            (unsigned int)(size * count), (unsigned int)size, (unsigned int)count,
+            stream != nullptr ? (int)stream->type : -1,
+            stream != nullptr && stream->type == XFILE_TYPE_DFILE && stream->dfile != nullptr && stream->dfile->entry != nullptr
+                ? stream->dfile->entry->path
+                : "?",
+            (unsigned int)(unsigned long)__builtin_return_address(0));
+        fflush(stdout);
+    }
+#endif
+
     assert(ptr); // "ptr", "xfile.c", 421
     assert(stream); // "stream", "xfile.c", 422
 

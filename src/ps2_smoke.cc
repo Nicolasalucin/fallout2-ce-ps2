@@ -39,6 +39,7 @@ extern "C" {
 #include "platform/ps2/ps2_heap.h"
 }
 
+#include "platform/ps2/ps2_fs.h"
 #include "platform/ps2/ps2_input.h"
 #include "platform/ps2/ps2_log.h"
 #include "platform/ps2/ps2_osk.h"
@@ -1573,6 +1574,18 @@ static bool smoke_act_tour(void)
 
         ps2_perf_frame_reset();
 
+        /* Reproduce the engine's own map-change sequence: mapNewMap() frees
+         * the current map's objects, scripts and variables before another map
+         * is brought in (it is what the game calls on a real transition).
+         * Without it the tour accumulated map after map until the engine
+         * allocator failed in the middle of NEWR1's load. */
+        {
+            int usedBeforeKb = ps2_mem_get_usage_kb();
+            mapNewMap();
+            int usedAfterKb = ps2_mem_get_usage_kb();
+            SMOKE_LOG("tour: %s pre-load teardown freed %d KB (engine %d KB)", mapName, usedBeforeKb - usedAfterKb, usedAfterKb);
+        }
+
         int before = ps2_perf_map_load_last_ms();
         int rc = mapLoadByName(mapName);
         int loadMs = ps2_perf_map_load_last_ms();
@@ -1647,6 +1660,10 @@ static void smoke_report(void)
         s_fps_frames, avgMs, avgMs > 0 ? 1000 / avgMs : 0,
         s_fps_max_ms, s_fps_worst[0] != '\0' ? s_fps_worst : "?");
 
+    SMOKE_PERF("fs: fopen=%u canonicalize=%u dir-scans=%u dir-hits=%u",
+        ps2_fs_stat_fopen_calls, ps2_fs_stat_canonicalize_calls,
+        ps2_fs_stat_dir_scans, ps2_fs_stat_dir_cache_hits);
+
     ps2_perf_print();
 }
 
@@ -1679,6 +1696,7 @@ int ps2_smoke_main(void)
     s_active = true;
     s_run_start = ps2_time_ms();
     s_mem_next_report = s_run_start + SMOKE_MEM_PERIOD_MS;
+    ps2_fs_stat_reset();
 
     SMOKE_LOG("suite: start (%s)", ps2_mem_get_usage_kb() > 0 ? "ps2 dev smoke" : "ps2 dev smoke");
     smoke_select_parts();
