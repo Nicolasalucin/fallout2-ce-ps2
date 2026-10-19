@@ -184,6 +184,24 @@ void mem_check()
     }
 }
 
+// PS2 port: read-only access to the block allocator statistics above. Only
+// meaningful while gMallocProc is still the block allocator (the engine never
+// replaces it), which `mem_check` already assumes.
+size_t mem_get_current_bytes()
+{
+    return gMemoryBlocksCurrentSize;
+}
+
+size_t mem_get_peak_bytes()
+{
+    return gMemoryBlocksMaximumSize;
+}
+
+int mem_get_block_count()
+{
+    return gMemoryBlocksCurrentCount;
+}
+
 // NOTE: Inlined.
 //
 // 0x4C5CC4

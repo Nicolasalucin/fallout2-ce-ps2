@@ -25,6 +25,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <malloc.h>
+
+#include "art.h"
+#include "cache.h"
+#include "memory.h"
 #include "ps2_heap.h"
 
 namespace fallout {
@@ -40,8 +45,10 @@ typedef void(MemoryManagerPrintErrorProc)(const char* string);
 #define PS2_MEM_SOUND_CACHE_MAX    (256 * 1024)         /* 256 KB default */
 #define PS2_MEM_WARN_THRESHOLD     (PS2_MEM_TOTAL_BUDGET * 9 / 10)  /* 90% */
 
-static size_t s_ps2_total_allocated = 0;
-static size_t s_ps2_peak_allocated = 0;
+/* Usage is read from the block allocator in memory.cc (exact, O(1)); the
+ * previous per-call counter could not know the size of a block when it was
+ * freed (it subtracted a fixed 1 KB), so it under-reported real pressure and
+ * hid the exhaustion that broke NEWR1's map load. */
 static int s_ps2_oom_count = 0;
 
 /* ---- Global proc pointers (mirror the upstream memory_manager.cc) ---- */
@@ -134,27 +141,48 @@ static int memoryManagerPrintError(const char* format, ...)
 
 /* ---- Safe allocators (used by engine code) ---- */
 
+/* Budget gate: `size` additional bytes must fit in the PS2 budget. Usage is
+ * read from memory.cc's block allocator, which backs every internal_*
+ * allocation, so the number is exact. */
+static bool ps2MemBudgetAllows(size_t size, const char* what, const char* file, int line)
+{
+    size_t used = mem_get_current_bytes();
+
+    if (used + size > PS2_MEM_TOTAL_BUDGET) {
+        printf("[ps2] mem: OOM denied %s %zu bytes (engine %zu/%zu KB) at %s:%d\n",
+               what, size, used / 1024, (size_t)(PS2_MEM_TOTAL_BUDGET / 1024), file, line);
+        s_ps2_oom_count++;
+        return false;
+    }
+
+    return true;
+}
+
+static void* ps2MemAllocationFailed(const char* what, size_t size, const char* file, int line)
+{
+    struct mallinfo mi = mallinfo();
+
+    printf("[ps2] mem: %s of %zu bytes failed at %s:%d (engine %zu KB, SDK free=%d KB in %d chunks, arena=%d KB)\n",
+           what, size, file, line, mem_get_current_bytes() / 1024,
+           mi.fordblks / 1024, mi.ordblks, mi.arena / 1024);
+    /* Dump the allocator's free-chunk distribution once: it tells exhaustion
+     * (small total) apart from fragmentation (large total, small chunks). */
+    malloc_stats();
+    s_ps2_oom_count++;
+    return nullptr;
+}
+
 void* internal_malloc_safe(size_t size, const char* file, int line)
 {
     ps2_mem_init_procs();
 
-    /* Budget check before allocating */
-    if (s_ps2_total_allocated + size > PS2_MEM_TOTAL_BUDGET) {
-        printf("[ps2] mem: OOM denied %zu bytes (used %zu/%zu MB) at %s:%d\n",
-               size, s_ps2_total_allocated / (1024*1024), PS2_MEM_TOTAL_BUDGET / (1024*1024), file, line);
-        s_ps2_oom_count++;
+    if (!ps2MemBudgetAllows(size, "malloc", file, line)) {
         return nullptr;
     }
 
     void* ptr = gMemoryManagerMallocProc(size);
     if (ptr == nullptr) {
-        s_ps2_oom_count++;
-        return nullptr;
-    }
-
-    s_ps2_total_allocated += size;
-    if (s_ps2_total_allocated > s_ps2_peak_allocated) {
-        s_ps2_peak_allocated = s_ps2_total_allocated;
+        return ps2MemAllocationFailed("malloc", size, file, line);
     }
 
     return ptr;
@@ -169,23 +197,13 @@ void* internal_realloc_safe(void* ptr, size_t size, const char* file, int line)
         return nullptr;
     }
 
-    if (s_ps2_total_allocated + size > PS2_MEM_TOTAL_BUDGET) {
-        printf("[ps2] mem: OOM denied realloc %zu bytes (used %zu/%zu MB) at %s:%d\n",
-               size, s_ps2_total_allocated / (1024*1024), PS2_MEM_TOTAL_BUDGET / (1024*1024), file, line);
-        s_ps2_oom_count++;
+    if (!ps2MemBudgetAllows(size, "realloc", file, line)) {
         return nullptr;
     }
 
     void* new_ptr = gMemoryManagerReallocProc(ptr, size);
     if (new_ptr == nullptr) {
-        s_ps2_oom_count++;
-        return nullptr;
-    }
-
-    /* Rough tracking - we don't know exact old size */
-    s_ps2_total_allocated += size;
-    if (s_ps2_total_allocated > s_ps2_peak_allocated) {
-        s_ps2_peak_allocated = s_ps2_total_allocated;
+        return ps2MemAllocationFailed("realloc", size, file, line);
     }
 
     return new_ptr;
@@ -198,12 +216,6 @@ void internal_free_safe(void* ptr, const char* file, int line)
         return;  /* Graceful: don't exit(1) */
     }
     gMemoryManagerFreeProc(ptr);
-    /* Rough estimate */
-    if (s_ps2_total_allocated > 1024) {
-        s_ps2_total_allocated -= 1024;
-    } else {
-        s_ps2_total_allocated = 0;
-    }
 }
 
 void* internal_calloc_safe(int count, int size, const char* file, int line)
@@ -211,24 +223,17 @@ void* internal_calloc_safe(int count, int size, const char* file, int line)
     ps2_mem_init_procs();
 
     size_t total = (size_t)count * (size_t)size;
-    if (s_ps2_total_allocated + total > PS2_MEM_TOTAL_BUDGET) {
-        printf("[ps2] mem: OOM denied calloc %zu bytes at %s:%d\n",
-               total, file, line);
-        s_ps2_oom_count++;
+
+    if (!ps2MemBudgetAllows(total, "calloc", file, line)) {
         return nullptr;
     }
 
     void* ptr = gMemoryManagerMallocProc(total);
     if (ptr == nullptr) {
-        s_ps2_oom_count++;
-        return nullptr;
+        return ps2MemAllocationFailed("calloc", total, file, line);
     }
 
     memset(ptr, 0, total);
-    s_ps2_total_allocated += total;
-    if (s_ps2_total_allocated > s_ps2_peak_allocated) {
-        s_ps2_peak_allocated = s_ps2_total_allocated;
-    }
 
     return ptr;
 }
@@ -238,24 +243,17 @@ char* strdup_safe(const char* string, const char* file, int line)
     ps2_mem_init_procs();
 
     size_t size = strlen(string) + 1;
-    if (s_ps2_total_allocated + size > PS2_MEM_TOTAL_BUDGET) {
-        printf("[ps2] mem: OOM denied strdup %zu bytes at %s:%d\n",
-               size, file, line);
-        s_ps2_oom_count++;
+
+    if (!ps2MemBudgetAllows(size, "strdup", file, line)) {
         return nullptr;
     }
 
     void* ptr = gMemoryManagerMallocProc(size);
     if (ptr == nullptr) {
-        s_ps2_oom_count++;
-        return nullptr;
+        return (char*)ps2MemAllocationFailed("strdup", size, file, line);
     }
 
     strcpy((char*)ptr, string);
-    s_ps2_total_allocated += size;
-    if (s_ps2_total_allocated > s_ps2_peak_allocated) {
-        s_ps2_peak_allocated = s_ps2_total_allocated;
-    }
 
     return (char*)ptr;
 }
@@ -264,10 +262,14 @@ char* strdup_safe(const char* string, const char* file, int line)
 
 void ps2_mem_print_stats_impl(void)
 {
-    printf("[ps2] mem: used=%zu KB peak=%zu KB budget=%zu KB oom_events=%d\n",
-           s_ps2_total_allocated / 1024,
-           s_ps2_peak_allocated / 1024,
-           PS2_MEM_TOTAL_BUDGET / 1024,
+    struct mallinfo mi = mallinfo();
+
+    printf("[ps2] mem: engine=%zu KB peak=%zu KB blocks=%d | sdk used=%d KB free=%d KB chunks=%d arena=%d KB | art=%d KB/%d KB | oom_events=%d\n",
+           mem_get_current_bytes() / 1024,
+           mem_get_peak_bytes() / 1024,
+           mem_get_block_count(),
+           mi.uordblks / 1024, mi.fordblks / 1024, mi.ordblks, mi.arena / 1024,
+           gArtCache.size / 1024, gArtCache.maxSize / 1024,
            s_ps2_oom_count);
     fflush(stdout);
 }
@@ -279,45 +281,17 @@ extern "C" void fallout_ps2_mem_print_stats_impl(void)
 
 int ps2_mem_get_usage_kb(void)
 {
-    return (int)(s_ps2_total_allocated / 1024);
+    return (int)(mem_get_current_bytes() / 1024);
 }
 
 int ps2_mem_get_peak_kb(void)
 {
-    return (int)(s_ps2_peak_allocated / 1024);
+    return (int)(mem_get_peak_bytes() / 1024);
 }
 
 int ps2_mem_get_oom_count(void)
 {
     return s_ps2_oom_count;
 }
-
-/* Cache reservation helpers */
-
-int ps2_mem_reserve_cache(const char* name, size_t bytes)
-{
-    if (s_ps2_total_allocated + bytes > PS2_MEM_TOTAL_BUDGET) {
-        printf("[ps2] mem: cache reserve failed for %s (%zu KB), budget full\n",
-               name, bytes / 1024);
-        return -1;
-    }
-    s_ps2_total_allocated += bytes;
-    printf("[ps2] mem: reserved %zu KB for %s (total %zu KB)\n",
-           bytes / 1024, name, s_ps2_total_allocated / 1024);
-    return 0;
-}
-
-void ps2_mem_release_cache(size_t bytes)
-{
-    if (s_ps2_total_allocated > bytes) {
-        s_ps2_total_allocated -= bytes;
-    } else {
-        s_ps2_total_allocated = 0;
-    }
-}
-
-/* ---- Budget constants (used by ps2_heap.h declaration) ---- */
-
-const size_t PS2_MEM_TOTAL_BUDGET_KB = PS2_MEM_TOTAL_BUDGET / 1024;
 
 } /* namespace fallout */
