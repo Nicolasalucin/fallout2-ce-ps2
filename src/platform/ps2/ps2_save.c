@@ -26,6 +26,7 @@
 #include <loadfile.h>
 #include <sifrpc.h>
 
+#include "ps2_debug.h"
 #include "ps2_fs.h"
 #include "ps2_log.h"
 
@@ -172,6 +173,68 @@ const char* ps2_save_root(void)
     return s_root;
 }
 
+/* ------------------------------------------------------ runtime overlay --- */
+
+/* The engine treats per-session state as loose files next to the game data:
+ *
+ *   MAPS\<name>.SAV      map state (written when leaving a map)
+ *   MAPS\AUTOMAP.DB      automap database
+ *   MAPS\AUTOMAP.TMP     automap save scratch file
+ *
+ * On a real PS2 the game media is normally a read-only DVD, or a FAT32 stick
+ * we would rather not rewrite on every map transition. Those paths are
+ * redirected to a dedicated writable directory on the save device:
+ *
+ *   MAPS\... -> <save root>FALLOUT2_RT/MAPS/...
+ *
+ * Reads of everything else under MAPS (the .MAP files, .GAM global vars)
+ * fall through to the data roots in fs.c, and the engine's own
+ * MapDirErase("MAPS\\", "SAV") listings resolve to the overlay, so a new
+ * game wipes only session state and never the shipped media. */
+#define PS2_SAVE_RUNTIME_NAME "FALLOUT2_RT"
+
+static char s_runtime_root[PS2_SAVE_PATH_MAX];
+static int s_runtime_ready;
+
+static void save_runtime_prepare(void)
+{
+    const char* colon;
+    char device[PS2_SAVE_PATH_MAX];
+    char path[PS2_SAVE_PATH_MAX];
+
+    if (s_runtime_ready) {
+        return;
+    }
+    s_runtime_ready = 1;
+
+    ps2_save_init();
+
+    /* Canonicalize the colon spelling ("host:assets" -> "host:/assets") so
+     * the overlay prefix matches the paths fs.c resolves. */
+    colon = strchr(s_root, ':');
+    if (colon != NULL && colon[1] != '/' && colon[1] != '\0') {
+        int prefix = (int)(colon - s_root) + 1;
+        snprintf(device, sizeof(device), "%.*s/%s", prefix, s_root, s_root + prefix);
+    } else {
+        snprintf(device, sizeof(device), "%s", s_root);
+    }
+
+    snprintf(s_runtime_root, sizeof(s_runtime_root), "%s" PS2_SAVE_RUNTIME_NAME, device);
+
+    mkdir(s_runtime_root, 0755);
+    snprintf(path, sizeof(path), "%s/MAPS", s_runtime_root);
+    mkdir(path, 0755);
+
+    printf("[ps2] save: runtime overlay '%s'\n", s_runtime_root);
+    PS2_LOG("[ps2] save: runtime overlay '%s'", s_runtime_root);
+}
+
+const char* ps2_save_runtime_root(void)
+{
+    save_runtime_prepare();
+    return s_runtime_root;
+}
+
 /* --------------------------------------------------------------- remap --- */
 
 int ps2_save_remap(const char* path, char* out, int out_size)
@@ -187,6 +250,7 @@ int ps2_save_remap(const char* path, char* out, int out_size)
     }
 
     ps2_save_init();
+    save_runtime_prepare();
 
     PS2_LOGV("[ps2] save_remap: in='%s'\n", path);
 
@@ -194,67 +258,117 @@ int ps2_save_remap(const char* path, char* out, int out_size)
     if (strncasecmp(p, "data", 4) == 0 && (p[4] == '/' || p[4] == '\\')) {
         p += 5;
     }
-    if (strncasecmp(p, "SAVEGAME", 8) != 0) {
-        PS2_LOGV("[ps2] save_remap: no SAVEGAME prefix, p='%s'\n", p);
-        return -1;
-    }
-    p += 8;
 
-    if (*p == '\0') {
-        /* The save root itself (the engine mkdir()s it before the slots). */
-        snprintf(out, out_size, "%s", s_root);
-        PS2_LOGV("[ps2] save_remap: root -> '%s'\n", out);
-        return 0;
-    }
+    /* xfile's directory xbases hand over absolute device paths (the runtime
+     * overlay is registered as one). Strip it and remap the engine-relative
+     * remainder: SAVEGAME files must still land in a memory-card slot. */
+    if (strchr(p, ':') != NULL) {
+        size_t prefix = strlen(s_runtime_root);
 
-    if (*p != '/' && *p != '\\') {
-        PS2_LOGV("[ps2] save_remap: no separator after SAVEGAME, p='%s'\n", p);
-        return -1;
-    }
-    p++;
-
-    if (strncasecmp(p, "SLOT", 4) != 0
-        || p[4] < '0' || p[4] > '9'
-        || p[5] < '0' || p[5] > '9') {
-        PS2_LOGV("[ps2] save_remap: bad SLOT, p='%s'\n", p);
-        return -1;
-    }
-    slot = (p[4] - '0') * 10 + (p[5] - '0');
-    if (slot < 1 || slot > PS2_SAVE_SLOT_COUNT) {
-        PS2_LOGV("[ps2] save_remap: slot %d out of range\n", slot);
-        return -1;
-    }
-    if (p[6] != '\0' && p[6] != '/' && p[6] != '\\') {
-        PS2_LOGV("[ps2] save_remap: bad char after SLOT, p='%s'\n", p);
-        return -1;
+        if (strncasecmp(p, s_runtime_root, prefix) == 0
+            && (p[prefix] == '\0' || p[prefix] == '/' || p[prefix] == '\\')) {
+            p += prefix;
+            if (*p == '/' || *p == '\\') {
+                p++;
+            }
+        }
     }
 
-    save_slot_dir(slot, dir, sizeof(dir));
+    if (strncasecmp(p, "SAVEGAME", 8) == 0) {
+        p += 8;
 
-    if (p[6] == '\0') {
-        snprintf(out, out_size, "%s", dir);
-        PS2_LOGV("[ps2] save_remap: slot dir -> '%s'\n", out);
-        return 0;
-    }
+        if (*p == '\0') {
+            /* The save root itself (the engine mkdir()s it before the slots). */
+            snprintf(out, out_size, "%s", s_root);
+            PS2_LOGV("[ps2] save_remap: root -> '%s'\n", out);
+            return 0;
+        }
 
-    len = snprintf(out, out_size, "%s/", dir);
-    if (len < 0 || len >= out_size - 1) {
-        return -1;
-    }
-
-    /* Append the remainder with normalized separators. */
-    rest = p + 7;
-    while (*rest != '\0') {
-        if (len >= out_size - 1) {
+        if (*p != '/' && *p != '\\') {
+            PS2_LOGV("[ps2] save_remap: no separator after SAVEGAME, p='%s'\n", p);
             return -1;
         }
-        out[len++] = (*rest == '\\') ? '/' : *rest;
-        rest++;
-    }
-    out[len] = '\0';
+        p++;
 
-    PS2_LOGV("[ps2] save_remap: full -> '%s'\n", out);
-    return 0;
+        if (strncasecmp(p, "SLOT", 4) != 0
+            || p[4] < '0' || p[4] > '9'
+            || p[5] < '0' || p[5] > '9') {
+            PS2_LOGV("[ps2] save_remap: bad SLOT, p='%s'\n", p);
+            return -1;
+        }
+        slot = (p[4] - '0') * 10 + (p[5] - '0');
+        if (slot < 1 || slot > PS2_SAVE_SLOT_COUNT) {
+            PS2_LOGV("[ps2] save_remap: slot %d out of range\n", slot);
+            return -1;
+        }
+        if (p[6] != '\0' && p[6] != '/' && p[6] != '\\') {
+            PS2_LOGV("[ps2] save_remap: bad char after SLOT, p='%s'\n", p);
+            return -1;
+        }
+
+        save_slot_dir(slot, dir, sizeof(dir));
+
+        if (p[6] == '\0') {
+            snprintf(out, out_size, "%s", dir);
+            PS2_LOGV("[ps2] save_remap: slot dir -> '%s'\n", out);
+            return 0;
+        }
+
+        len = snprintf(out, out_size, "%s/", dir);
+        if (len < 0 || len >= out_size - 1) {
+            return -1;
+        }
+
+        /* Append the remainder with normalized separators. */
+        rest = p + 7;
+        while (*rest != '\0') {
+            if (len >= out_size - 1) {
+                return -1;
+            }
+            out[len++] = (*rest == '\\') ? '/' : *rest;
+            rest++;
+        }
+        out[len] = '\0';
+
+        PS2_LOGV("[ps2] save_remap: full -> '%s'\n", out);
+        return 0;
+    }
+
+    /* Session state under MAPS\: writable overlay on the save device. */
+    if (strncasecmp(p, "MAPS", 4) == 0
+        && (p[4] == '\0' || p[4] == '/' || p[4] == '\\')) {
+        rest = p + 4;
+        if (*rest == '/' || *rest == '\\') {
+            rest++;
+        }
+
+        len = snprintf(out, out_size, "%s/MAPS", s_runtime_root);
+        if (len < 0 || len >= out_size) {
+            return -1;
+        }
+
+        if (*rest != '\0') {
+            if (len >= out_size - 1) {
+                return -1;
+            }
+            out[len++] = '/';
+
+            while (*rest != '\0') {
+                if (len >= out_size - 1) {
+                    return -1;
+                }
+                out[len++] = (*rest == '\\') ? '/' : *rest;
+                rest++;
+            }
+        }
+        out[len] = '\0';
+
+        PS2_LOGV("[ps2] save_remap: maps overlay -> '%s'\n", out);
+        return 0;
+    }
+
+    PS2_LOGV("[ps2] save_remap: no overlay prefix, p='%s'\n", p);
+    return -1;
 }
 
 /* ----------------------------------------------------- browser metadata --- */

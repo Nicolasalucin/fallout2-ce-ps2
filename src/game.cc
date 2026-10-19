@@ -67,6 +67,11 @@
 #include "window_manager.h"
 #include "window_manager_private.h"
 #include "worldmap.h"
+#include "xfile.h"
+
+#ifdef __PS2__
+#include "ps2_save.h"
+#endif
 
 namespace fallout {
 
@@ -1400,6 +1405,28 @@ static int gameDbInit()
     if (compat_access("f2_res.dat", 0) == 0) {
         dbOpen("f2_res.dat", 0, nullptr, 1);
     }
+
+#ifdef __PS2__
+    /* Override precedence on the PS2:
+     *
+     * 1. Loose files in data/ must win over everything packed in the .DATs
+     *    (Spanish translations, sfall-compatible scripts). xbaseOpen() moves
+     *    an already-registered xbase to the front, so re-opening "data" here
+     *    puts it above patch000.dat/f2_res.dat.
+     * 2. The runtime overlay comes last so session state written under
+     *    MAPS\ (map .SAV files, AUTOMAP.DB) is preferred over any shipped
+     *    copy, while everything it does not contain still falls through to
+     *    data/ and the .DATs.
+     *
+     * The overlay is a real directory on the save device; registering it as
+     * a directory xbase makes xfile try it first for both reads and writes,
+     * and xlistInit enumerates it together with the other xbases (that is
+     * what makes MapDirErase("MAPS\\", "SAV") see the overlay files). */
+    xbaseOpen("data");
+    if (ps2_save_runtime_root()[0] != '\0') {
+        xbaseOpen(ps2_save_runtime_root());
+    }
+#endif
 
     return 0;
 }

@@ -114,6 +114,19 @@ static void fs_normalize(const char* path, char* out, int out_size)
     out[i] = '\0';
 }
 
+/* Case-insensitive suffix test ("ARTEMPLE.SAV" vs ".sav"). */
+static int fs_has_suffix(const char* path, const char* suffix)
+{
+    size_t path_length = strlen(path);
+    size_t suffix_length = strlen(suffix);
+
+    if (path_length < suffix_length) {
+        return 0;
+    }
+
+    return strcasecmp(path + path_length - suffix_length, suffix) == 0;
+}
+
 /* A root is usable when both game datafiles resolve there: the engine needs
  * both, so accepting a root with only master.dat would just move the failure
  * deeper into the boot.
@@ -1096,16 +1109,23 @@ int ps2_fs_resolve_kind(const char* path, char* out, int out_size, int writable,
         return -1;
     }
 
-    /* engine save slots (SAVEGAME\SLOTxx\...) are redirected to the save
-     * device before any data-root probing. */
+    /* Engine save slots (SAVEGAME\SLOTxx\...) and session state under MAPS\
+     * are redirected to the writable save device before any data-root
+     * probing. If the redirected file does not exist, reads of ordinary map
+     * data (.MAP, .GAM, AUTOMAP.DB on a fresh install) fall through to the
+     * read-only roots below. Map states (*.SAV) never do: a stale state file
+     * shipped on the medium must not shadow the .MAP. */
     {
         char remapped[PS2_FS_PATH_MAX];
         if (ps2_save_remap(norm, remapped, sizeof(remapped)) == 0) {
-            if (fs_canonicalize_kind(remapped, writable, out_kind) != 0) {
+            if (fs_canonicalize_kind(remapped, writable, out_kind) == 0) {
+                strcpy(out, remapped);
+                return 0;
+            }
+
+            if (!writable && fs_has_suffix(norm, ".sav")) {
                 return -1;
             }
-            strcpy(out, remapped);
-            return 0;
         }
     }
 
@@ -1132,6 +1152,84 @@ int ps2_fs_resolve_kind(const char* path, char* out, int out_size, int writable,
 int ps2_fs_resolve(const char* path, char* out, int out_size, int writable)
 {
     return ps2_fs_resolve_kind(path, out, out_size, writable, NULL);
+}
+
+/* Copy-on-write for the runtime overlay.
+ *
+ * The engine opens some files read-write although they are only seeded on
+ * the (read-only) medium - AUTOMAP.DB is the important one: an installer or
+ * a previous PC session may ship it, but updates have to land in the
+ * writable overlay. The first writable open brings the seed copy into the
+ * overlay; every later open goes straight to the writable copy.
+ *
+ * Map states (*.SAV) are deliberately excluded: they are session data and
+ * must never be imported from the medium (a stale state file would shadow
+ * the .MAP). */
+static int fs_copy_to_overlay(const char* norm, const char* overlay_path)
+{
+    char source[PS2_FS_PATH_MAX];
+    char buffer[4096];
+    FILE* in;
+    FILE* out;
+    size_t count;
+    int found = 0;
+    int i;
+    int rc = -1;
+
+    if (fs_has_suffix(norm, ".sav")) {
+        return -1;
+    }
+
+    if (strchr(norm, ':') != NULL) {
+        snprintf(source, sizeof(source), "%s", norm);
+        if (ps2_fs_canonicalize(source, 0) == 0) {
+            found = 1;
+        }
+    } else {
+        for (i = 0; i < s_root_count; i++) {
+            snprintf(source, sizeof(source), "%s%s", s_roots[i], norm);
+            if (ps2_fs_canonicalize(source, 0) == 0) {
+                found = 1;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        return -1;
+    }
+
+    in = fs_do_open(source, "rb", 0);
+    if (in == NULL) {
+        return -1;
+    }
+
+    out = fs_do_open(overlay_path, "wb", 1);
+    if (out == NULL) {
+        fclose(in);
+        return -1;
+    }
+
+    while ((count = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+        if (fwrite(buffer, 1, count, out) != count) {
+            goto done;
+        }
+    }
+
+    rc = ferror(in) ? -1 : 0;
+
+done:
+    fclose(out);
+    fclose(in);
+
+    if (rc != 0) {
+        ps2_fs_remove(overlay_path);
+    } else {
+        ps2_fs_invalidate_parent_of(overlay_path);
+        PS2_LOGV("[ps2] fs: overlay seed copy '%s' -> '%s'\n", source, overlay_path);
+    }
+
+    return rc;
 }
 
 FILE* ps2_fs_fopen(const char* path, const char* mode)
@@ -1164,16 +1262,34 @@ FILE* ps2_fs_fopen(const char* path, const char* mode)
     ps2_fs_stat_fopen_calls++;
 #endif
 
-    /* save-slot files live on the save device, not in the data roots. */
+    /* Save-slot files and the MAPS session overlay live on the save device,
+     * not in the data roots. Missing non-state files fall through to the
+     * read-only roots; missing *.SAV reads do not (see resolve_kind). */
     {
         char remapped[PS2_FS_PATH_MAX];
         if (ps2_save_remap(norm, remapped, sizeof(remapped)) == 0) {
             PS2_LOGV("[ps2] fs_fopen: remapped '%s' -> '%s'\n", norm, remapped);
-            if (ps2_fs_canonicalize(remapped, writable) != 0) {
-                PS2_LOGV("[ps2] fs_fopen: canonicalize failed for '%s'\n", remapped);
+            if (ps2_fs_canonicalize(remapped, writable) == 0) {
+                FILE* f = fs_do_open(remapped, mode, writable);
+                if (f != NULL) {
+                    return f;
+                }
+            }
+
+            PS2_LOGV("[ps2] fs_fopen: overlay miss for '%s'\n", remapped);
+            if (writable) {
+                /* Seed the overlay from a read-only copy once (AUTOMAP.DB),
+                 * then reopen the writable path. */
+                if (fs_copy_to_overlay(norm, remapped) == 0
+                    && ps2_fs_canonicalize(remapped, writable) == 0) {
+                    return fs_do_open(remapped, mode, writable);
+                }
                 return NULL;
             }
-            return fs_do_open(remapped, mode, writable);
+
+            if (fs_has_suffix(norm, ".sav")) {
+                return NULL;
+            }
         } else {
             PS2_LOGV("[ps2] fs_fopen: remap failed for '%s'\n", norm);
         }

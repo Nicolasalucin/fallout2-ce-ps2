@@ -13,6 +13,11 @@
  *   data\SAVEGAME                -> <root>/
  *   data\SAVEGAME\SLOT01\X.SAV   -> <root>/<slot dir>/X.SAV
  *
+ * Per-session state that the engine keeps next to the game data is moved to
+ * the same writable device, so the media can be a read-only DVD:
+ *
+ *   MAPS\*.SAV, MAPS\AUTOMAP.DB  -> <root>/FALLOUT2_RT/MAPS/...
+ *
  * Device selection (probed once, first use):
  *
  *   mc0:/   slots FALLOUT2_S01..FALLOUT2_S10   (preferred)
@@ -47,6 +52,11 @@ void ps2_save_init(void);
 /* Root path of the selected save device, e.g. "mc0:/" or
  * "host:local_assets/saves/". */
 const char* ps2_save_root(void);
+
+/* Writable overlay for session state ("<save root>/FALLOUT2_RT"), created on
+ * first use together with its MAPS subdirectory. Returned without a trailing
+ * slash; safe to call before the engine database is initialized. */
+const char* ps2_save_runtime_root(void);
 
 /* Remaps an engine save path onto the save device. Accepts relative
  * "SAVEGAME..." / "data\SAVEGAME..." spellings ("/" or "\" separators, any
