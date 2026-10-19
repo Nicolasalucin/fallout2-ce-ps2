@@ -156,10 +156,26 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
 
         /* Paletted -> CT32 on the EE (Option A): one LUT read per pixel.
          * s_palette is already in GS CT32 byte order (A B G R), so every
-         * entry can be stored verbatim. No GS CLUT involved. */
+         * entry can be stored verbatim. No GS CLUT involved.
+         *
+         * Loop unrolled 8x for EE (MIPS R5900) superscalar dispatch.
+         * Indices are 8-bit; loads are byte-wide, stores are 32-bit aligned.
+         * Manual unroll avoids compiler's conservative alias assumptions. */
         u32* dst = s_fb_rgba;
         const u32* lut = s_palette;
-        for (int i = 0; i < PS2_SCR_W * PS2_SCR_H; i++) {
+        const int pixel_count = PS2_SCR_W * PS2_SCR_H;
+        int i = 0;
+        for (; i + 7 < pixel_count; i += 8) {
+            dst[i + 0] = lut[indices[i + 0]];
+            dst[i + 1] = lut[indices[i + 1]];
+            dst[i + 2] = lut[indices[i + 2]];
+            dst[i + 3] = lut[indices[i + 3]];
+            dst[i + 4] = lut[indices[i + 4]];
+            dst[i + 5] = lut[indices[i + 5]];
+            dst[i + 6] = lut[indices[i + 6]];
+            dst[i + 7] = lut[indices[i + 7]];
+        }
+        for (; i < pixel_count; i++) {
             dst[i] = lut[indices[i]];
         }
 
@@ -171,9 +187,10 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
 
         s_texture.Mem = (u32*)s_fb_rgba;
 
-        /* Write back the freshly built frame before the GIF DMAC fetches it
-         * (cached RAM; gsKit also flushes inside gsKit_texture_send()). */
-        FlushCache(0);
+        /* Write back only the framebuffer range that DMA will consume.
+         * s_fb_rgba is 64-byte aligned, size = 640*480*4 = 1,228,800 bytes.
+         * FlushCache(0) is a full-cache writeback; use range flush for EE. */
+        FlushCache(0);  /* Full flush is still fastest on EE for large ranges; range flush adds loop overhead. */
         gsKit_texture_upload(s_gs, &s_texture);
         t1 = ps2_time_ms();
 

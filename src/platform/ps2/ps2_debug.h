@@ -44,6 +44,15 @@ const char* ps2_debug_path(void);
 
 #define PS2_LOG(...) ps2_debug_printf(__VA_ARGS__)
 
+/* Verbose logging: only active when PS2_DEBUG_VERBOSE is defined.
+ * In Release builds (CMAKE_BUILD_TYPE=Release) this is a no-op,
+ * eliminating all printf/fprintf overhead from the hot path. */
+#if defined(PS2_DEBUG_VERBOSE)
+#define PS2_LOGV(...) ps2_debug_printf(__VA_ARGS__)
+#else
+#define PS2_LOGV(...) do { } while (0)
+#endif
+
 #ifdef __cplusplus
 }
 #endif

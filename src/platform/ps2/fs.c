@@ -26,7 +26,7 @@
 /* PS2 port: 32 KB per pooled .DAT stream. The stream buffer is pure heap
  * (one per open .DAT), and reads from the CD/DVD/host are already served in
  * large chunks, so a smaller buffer frees memory without hurting throughput. */
-#define PS2_FS_DAT_BUFSIZE (32 * 1024)
+#define PS2_FS_DAT_BUFSIZE (64 * 1024)  /* 64 KB: optimizado para USB 1.1 bulk endpoints (PS2 ~1 MB/s). Buffers mayores reducen overhead de syscalls y maximizan throughput en DAT streams. */
 
 /* Fallback chain (after the ELF-relative roots, which ps2_fs_init()
  * prepends dynamically): mass: -> mass0: -> cdrom0: -> hdd0: -> host:. */

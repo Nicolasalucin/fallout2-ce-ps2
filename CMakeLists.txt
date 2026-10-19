@@ -38,10 +38,28 @@ if(PS2_DEV_SMOKE_TEST)
     add_compile_definitions(PS2_DEV_SMOKE_TEST)
 endif()
 
+# Verbose debug logging (PS2_LOGV/PS2_DEBUG_LOGV) only in non-Release builds.
+# In Release, verbose logs are compiled out entirely.
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_definitions(PS2_DEBUG_VERBOSE)
+endif()
+
 if(ANDROID)
     add_library(${EXECUTABLE_NAME} SHARED)
 else()
     add_executable(${EXECUTABLE_NAME} WIN32 MACOSX_BUNDLE)
+endif()
+
+# MIPS R5900 (EE) optimizations (must be after target creation):
+# -fno-exceptions -fno-rtti: reduce binary size, no C++ exceptions/RTTI used
+# -fno-pic: position-dependent code is smaller/faster on EE
+# Note: -mips3/-mgp32/-mfp32 conflict with the 64-bit EE ABI used by the SDK.
+if(PS2)
+    target_compile_options(${EXECUTABLE_NAME} PRIVATE
+        -fno-exceptions
+        -fno-rtti
+        -fno-pic
+    )
 endif()
 
 target_sources(${EXECUTABLE_NAME} PUBLIC

@@ -35,6 +35,12 @@ set(CMAKE_CXX_COMPILER mips64r5900el-ps2-elf-g++)
 set(EE_CFLAGS "-I${PS2SDK}/ee/include -I${PS2SDK}/common/include -I${PS2DEV}/gsKit/include -I${PS2SDK}/ports/include -D_EE -DPS2 -D__PS2__ -G0" CACHE STRING "EE C compiler flags" FORCE)
 set(EE_LDFLAGS "-L${PS2SDK}/ee/lib -L${PS2DEV}/gsKit/lib -L${PS2SDK}/ports/lib -Wl,-zmax-page-size=128 -T${PS2SDK}/ee/startup/linkfile" CACHE STRING "EE linker flags" FORCE)
 
+# Build type flags
+set(CMAKE_C_FLAGS_DEBUG "-Og -g")
+set(CMAKE_CXX_FLAGS_DEBUG "-Og -g")
+set(CMAKE_C_FLAGS_RELEASE "-O2 -fno-strict-aliasing -fomit-frame-pointer -ffast-math -mno-check-zero-division")
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -fno-strict-aliasing -fomit-frame-pointer -ffast-math -mno-check-zero-division")
+
 set(CMAKE_C_FLAGS_INIT ${EE_CFLAGS})
 set(CMAKE_CXX_FLAGS_INIT ${EE_CFLAGS})
 set(CMAKE_EXE_LINKER_FLAGS_INIT ${EE_LDFLAGS})
