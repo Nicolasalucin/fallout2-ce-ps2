@@ -43,6 +43,10 @@
 #include "window_manager_private.h"
 #include "worldmap.h"
 
+#if defined(__PS2__)
+#include "platform/ps2/ps2_perf.h"
+#endif
+
 namespace fallout {
 
 static char* mapBuildPath(char* name);
@@ -757,6 +761,10 @@ int mapLoadByName(char* fileName)
 
     compat_strupr(fileName);
 
+#if defined(__PS2__)
+    ps2_perf_map_load_begin();
+#endif
+
     rc = -1;
 
     char* extension = strstr(fileName, ".MAP");
@@ -789,6 +797,10 @@ int mapLoadByName(char* fileName)
             gDude->data.critter.combat.whoHitMe = nullptr;
         }
     }
+
+#if defined(__PS2__)
+    ps2_perf_map_load_end(fileName);
+#endif
 
     return rc;
 }
@@ -823,7 +835,15 @@ static int mapLoad(File* stream)
 
     int savedMouseCursorId = gameMouseGetCursor();
     gameMouseSetCursor(MOUSE_CURSOR_WAIT_PLANET);
+#if defined(__PS2__)
+    /* PS2: the read-progress callback repaints the mouse cursor from the
+     * middle of the file reader. Repainting every 32 KiB dominated the load
+     * time of big maps on the EE, so the progress callback only runs every
+     * 256 KiB here (the cursor still updates between chunk reads). */
+    fileSetReadProgressHandler(gameMouseRefreshImmediately, 262144);
+#else
     fileSetReadProgressHandler(gameMouseRefreshImmediately, 32768);
+#endif
     tileDisable();
 
     int rc = 0;

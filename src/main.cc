@@ -39,8 +39,9 @@
 #include "window.h"
 #include "window_manager.h"
 #include "window_manager_private.h"
-#include "word_wrap.h"
+#include "ps2_smoke.h"
 #include "worldmap.h"
+#include "word_wrap.h"
 
 namespace fallout {
 
@@ -81,6 +82,13 @@ int falloutMain(int argc, char** argv)
     if (!falloutInit(argc, argv)) {
         return 1;
     }
+
+#ifdef PS2_DEV_SMOKE_TEST
+    /* F6: the smoke harness (ps2_smoke.cc) replaces the intro movies and the
+     * main menu loop with a scripted suite driving the same entry points.
+     * It always terminates the process through exit(). */
+    return ps2_smoke_main();
+#endif
 
     // SFALL: Allow to skip intro movies
     int skipOpeningMovies;

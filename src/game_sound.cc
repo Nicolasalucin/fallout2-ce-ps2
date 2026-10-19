@@ -489,6 +489,16 @@ int soundEffectsGetVolume()
     return gSoundEffectsVolume;
 }
 
+#ifdef PS2_DEV_SMOKE_TEST
+/* F6 smoke hook: soundEffectsGetVolume is TU-local in this codebase (static
+ * forward declaration), so the harness accesses the value through this
+ * accessor instead of changing the upstream linkage. */
+int ps2_smoke_sound_effects_get_volume(void)
+{
+    return soundEffectsGetVolume();
+}
+#endif
+
 // NOTE: Inlined.
 //
 // 0x45045C

@@ -397,6 +397,16 @@ unsigned char _stat_flag;
 static int gPipboyPrevTab;
 static bool pipboy_available_at_game_start = false;
 
+#ifdef PS2_DEV_SMOKE_TEST
+/* F6 smoke hook: a temple-start game has not seen MOVIE_VSUIT yet, so the
+ * Pip-Boy UI would be unreachable for the harness. Only compiled into smoke
+ * builds. */
+void ps2_smoke_pipboy_set_available(void)
+{
+    pipboy_available_at_game_start = true;
+}
+#endif
+
 static FrmImage _pipboyFrmImages[PIPBOY_FRM_COUNT];
 
 // 0x497004

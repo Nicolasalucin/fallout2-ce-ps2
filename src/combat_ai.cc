@@ -35,6 +35,10 @@
 #include "text_object.h"
 #include "tile.h"
 
+#if defined(__PS2__)
+#include "platform/ps2/ps2_perf.h"
+#endif
+
 namespace fallout {
 
 #define AI_PACKET_CHEM_PRIMARY_DESIRE_COUNT (3)
@@ -2651,6 +2655,11 @@ static int _ai_called_shot(Object* attacker, Object* defender, int hitMode)
                     intelligenceRequired = 3;
                     break;
                 }
+#if defined(__PS2__)
+                /* [PERF] smoke probe: AI called-shot threshold driven by the
+                 * combat difficulty setting. */
+                ps2_perf_cbt_difficulty(PS2_PERF_CBT_AI, settings.preferences.combat_difficulty, intelligenceRequired);
+#endif
 
                 if (critterGetStat(attacker, STAT_INTELLIGENCE) >= intelligenceRequired) {
                     hitLocation = randomBetween(0, HIT_LOCATION_SPECIFIC_COUNT);
@@ -2665,6 +2674,28 @@ static int _ai_called_shot(Object* attacker, Object* defender, int hitMode)
 
     return hitLocation;
 }
+
+#ifdef PS2_DEV_SMOKE_TEST
+/* F6 smoke hook: the combat-difficulty branch inside _ai_called_shot sits
+ * behind a 1-in-called_freq random gate, so a short scripted battle may
+ * never reach it. The harness pins called_freq to 1 on the battle's AI
+ * participant, making the branch (and its [PERF] probe) deterministic.
+ * Returns the previous value (-1 when the critter has no AI packet). */
+int ps2_smoke_ai_set_called_freq(Object* critter, int freq)
+{
+    AiPacket* ai = aiGetPacket(critter);
+    int previous;
+
+    if (ai == nullptr) {
+        return -1;
+    }
+
+    previous = ai->called_freq;
+    ai->called_freq = freq;
+
+    return previous;
+}
+#endif
 
 // 0x42A748
 static int _ai_attack(Object* attacker, Object* defender, int hitMode)

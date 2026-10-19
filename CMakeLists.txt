@@ -245,6 +245,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/trait.h"
     "src/version.cc"
     "src/version.h"
+    "src/ps2_smoke.cc"
+    "src/ps2_smoke.h"
     "src/widget.cc"
     "src/widget.h"
     "src/win32.h"

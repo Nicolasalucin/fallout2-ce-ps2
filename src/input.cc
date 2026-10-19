@@ -15,6 +15,14 @@
 #include "touch.h"
 #include "win32.h"
 
+#if defined(__PS2__)
+#include "platform/ps2/ps2_perf.h"
+#include "platform/ps2/ps2_time.h"
+#endif
+#if defined(PS2_DEV_SMOKE_TEST)
+#include "ps2_smoke.h"
+#endif
+
 namespace fallout {
 
 typedef struct InputEvent {
@@ -153,6 +161,19 @@ void inputExit()
 int inputGetInput()
 {
     int v3;
+
+    /* PS2 dev smoke harness (F6): the tick runs on every input poll so the
+     * harness keeps control inside the engine's own modal loops (main menu,
+     * character editor, save/load, preferences, dialogue...). It only posts
+     * synthetic input and advances timers; blocking engine work runs from
+     * the harness driver loop instead (see ps2_smoke.cc). */
+#if defined(PS2_DEV_SMOKE_TEST)
+    ps2_smoke_tick();
+#endif
+#if defined(__PS2__)
+    /* [PERF] per-frame sampling for the smoke report. */
+    ps2_perf_frame_tick(ps2_time_ms());
+#endif
 
     _GNW95_process_message();
 
