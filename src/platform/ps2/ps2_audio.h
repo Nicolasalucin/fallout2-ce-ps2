@@ -36,6 +36,10 @@ void ps2_audio_pause(int paused);
 /* Stops the worker and releases audsrv (the engine calls this at exit). */
 void ps2_audio_close(void);
 
+/* Non-zero when the mixer is running in silent fallback mode (audsrv could
+ * not be loaded or initialized). Diagnostics only. */
+int ps2_audio_is_dummy(void);
+
 #ifdef __cplusplus
 }
 #endif

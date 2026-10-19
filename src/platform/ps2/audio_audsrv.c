@@ -57,12 +57,16 @@
  *   - Pause mutes the SPU2 ring via audsrv_stop_audio from the engine
  *     thread and parks the mixer on its semaphore; resume signals it.
  *
- *   - If anything fails the caller treats it as "machine with no sound card":
- *     audioEngineInit() returns false and the engine runs silent instead of
- *     hanging on the (never advancing) sound cursor.
+ *   - If anything fails the caller gets a virtual "dummy" device instead of
+ *     an error: the mixer thread still runs and advances the engine's sound
+ *     cursors in wall-clock time, but finished chunks are discarded. The
+ *     engine therefore keeps working (map transitions, movies, gameplay)
+ *     even on a machine with no usable audsrv, and no code path can hang
+ *     waiting for a sound cursor that never moves.
  */
 
 #include "ps2_audio.h"
+#include "ps2_debug.h"
 #include "ps2_storage.h"
 #include "ps2_time.h"
 
@@ -103,6 +107,12 @@ static int s_sema = -1;
 static volatile int s_running;
 static volatile int s_paused = 1;
 static volatile int s_muted;
+
+/* 1 = audsrv is unavailable/broken. The mixer thread still runs and the
+ * engine still consumes its callback (so every sound cursor advances), but
+ * finished chunks are discarded instead of being sent to the SPU2. This
+ * keeps map transitions and movies alive on machines with no usable audio. */
+static int s_dummy;
 
 /* 64-byte aligned so DMA-bound copies stay fast; S16 stereo. */
 static unsigned char s_chunk_buffer[PS2_AUDIO_MAX_SAMPLES * PS2_AUDIO_BYTES_PER_FRAME] __attribute__((aligned(64)));
@@ -182,6 +192,14 @@ void ps2_audio_pump(void)
 
     /* Engine (main) thread only: see the ring note above. */
     if (s_thread_id < 0 || s_paused) {
+        return;
+    }
+
+    /* Dummy mode: no RPCs, no SPU2 ring. Discard finished chunks; the mixer
+     * thread keeps advancing the engine's cursors in wall-clock time. */
+    if (s_dummy) {
+        s_ring_head = s_ring_tail;
+        s_muted = 0;
         return;
     }
 
@@ -273,7 +291,6 @@ static int audsrv_server_is_up(int wait_ms)
 int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback, void* userdata, int* out_freq)
 {
     int ret;
-    int module_result = -1;
 
     if (s_thread_id >= 0) {
         /* Already streaming: just swap the callback sink. */
@@ -343,53 +360,68 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
 
     /* Embedded module: the normal, file-less path on a real PS2. */
     if (!audsrv_server_is_up(0)) {
-        ret = SifExecModuleBuffer((void*)g_audsrv_irx, g_audsrv_irx_size, 0, NULL, &module_result);
-        printf("[ps2] audio: audsrv.irx (embedded) -> %d (result %d)\n", ret, module_result);
+        ret = ps2_irx_exec("audsrv.irx", g_audsrv_irx, g_audsrv_irx_size);
+        printf("[ps2] audio: audsrv.irx (embedded) -> %d\n", ret);
+        PS2_LOG("[ps2] audio: audsrv.irx (embedded) -> %d", ret);
     }
 
     if (!audsrv_server_is_up(2000)) {
-        printf("[ps2] audio: no audsrv RPC server, continuing without sound\n");
-        return -1;
-    }
+        printf("[ps2] audio: no audsrv RPC server, using DUMMY audio\n");
+        PS2_LOG("[ps2] audio: no audsrv RPC server -> DUMMY audio (silent, engine keeps running)");
+        s_dummy = 1;
+        s_freq = desired_freq;
+    } else {
+        ret = audsrv_init();
+        printf("[ps2] audio: audsrv_init -> %d\n", ret);
+        PS2_LOG("[ps2] audio: audsrv_init -> %d", ret);
+        if (ret != AUDSRV_ERR_NOERROR) {
+            PS2_LOG("[ps2] audio: audsrv_init failed -> DUMMY audio");
+            s_dummy = 1;
+            s_freq = desired_freq;
+        } else {
+            /* audsrv resamples to the SPU2 native rate internally ("convert
+             * it to SPU2's native format if required"), but stay defensive
+             * about the format: requested rate, its double (22050 -> 44100),
+             * then natives. */
+            int candidates[4];
+            int count = 0;
+            int i;
 
-    ret = audsrv_init();
-    printf("[ps2] audio: audsrv_init -> %d\n", ret);
-    if (ret != AUDSRV_ERR_NOERROR) {
-        return -1;
-    }
+            candidates[count++] = desired_freq;
+            candidates[count++] = desired_freq * 2;
+            candidates[count++] = 48000;
+            candidates[count++] = 44100;
 
-    /* audsrv resamples to the SPU2 native rate internally ("convert it to
-     * SPU2's native format if required"), but stay defensive about the
-     * format: requested rate, its double (22050 -> 44100), then natives. */
-    {
-        int candidates[4];
-        int count = 0;
-        int i;
+            s_freq = 0;
+            for (i = 0; i < count; i++) {
+                audsrv_fmt_t fmt;
 
-        candidates[count++] = desired_freq;
-        candidates[count++] = desired_freq * 2;
-        candidates[count++] = 48000;
-        candidates[count++] = 44100;
+                fmt.freq = candidates[i];
+                fmt.bits = PS2_AUDIO_BITS;
+                fmt.channels = PS2_AUDIO_CHANNELS;
 
-        s_freq = 0;
-        for (i = 0; i < count; i++) {
-            audsrv_fmt_t fmt;
+                ret = audsrv_set_format(&fmt);
+                PS2_LOG("[ps2] audio: set_format %d Hz -> %d", candidates[i], ret);
+                if (ret == AUDSRV_ERR_NOERROR) {
+                    s_freq = candidates[i];
+                    break;
+                }
+            }
 
-            fmt.freq = candidates[i];
-            fmt.bits = PS2_AUDIO_BITS;
-            fmt.channels = PS2_AUDIO_CHANNELS;
-
-            if (audsrv_set_format(&fmt) == AUDSRV_ERR_NOERROR) {
-                s_freq = candidates[i];
-                break;
+            printf("[ps2] audio: set_format -> %d Hz\n", s_freq);
+            if (s_freq == 0) {
+                /* Do not call audsrv_quit() here: if the server is wedged a
+                 * quit RPC could block the engine thread. Dummy mode simply
+                 * stops talking to it. */
+                PS2_LOG("[ps2] audio: set_format failed -> DUMMY audio");
+                s_dummy = 1;
+                s_freq = desired_freq;
             }
         }
+    }
 
-        printf("[ps2] audio: set_format -> %d Hz\n", s_freq);
-        if (s_freq == 0) {
-            audsrv_quit();
-            return -1;
-        }
+    if (s_dummy) {
+        PS2_LOG("[ps2] audio: DUMMY mode active (%d Hz, chunks discarded)", s_freq);
     }
 
     /* Wall-clock duration of one mixed chunk at the configured rate: the
@@ -397,7 +429,13 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
      * in real time even if the output pipeline stalls. */
     s_chunk_us = (samples * 1000000) / s_freq;
 
-    audsrv_set_volume(MAX_VOLUME);
+    /* Only touch audsrv when a server actually answered. With no server
+     * bound, audsrv_set_volume()'s SIF call never gets a reply and the
+     * engine thread would block forever (exactly the freeze the dummy
+     * fallback exists to prevent). */
+    if (!s_dummy) {
+        audsrv_set_volume(MAX_VOLUME);
+    }
 
     s_ring_head = 0;
     s_ring_tail = 0;
@@ -423,8 +461,11 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
         s_sema = CreateSema(&sema);
         if (s_sema < 0) {
             printf("[ps2] audio: CreateSema -> %d\n", (int)s_sema);
+            PS2_LOG("[ps2] audio: CreateSema -> %d (fatal)", (int)s_sema);
             s_running = 0;
-            audsrv_quit();
+            if (!s_dummy) {
+                audsrv_quit();
+            }
             return -1;
         }
 
@@ -437,9 +478,12 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
 
         s_thread_id = CreateThread(&thread);
         printf("[ps2] audio: worker thread -> %d (prio %d)\n", s_thread_id, priority);
+        PS2_LOG("[ps2] audio: worker thread -> %d (prio %d)", s_thread_id, priority);
         if (s_thread_id < 0) {
             s_running = 0;
-            audsrv_quit();
+            if (!s_dummy) {
+                audsrv_quit();
+            }
             return -1;
         }
 
@@ -447,7 +491,9 @@ int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback,
             DeleteThread(s_thread_id);
             s_thread_id = -1;
             s_running = 0;
-            audsrv_quit();
+            if (!s_dummy) {
+                audsrv_quit();
+            }
             return -1;
         }
     }
@@ -469,8 +515,9 @@ void ps2_audio_pause(int paused)
         s_paused = 1;
 
         /* Mute whatever is still queued in the SPU2 ring. This is a SIF
-         * call, so it runs here on the engine thread (see the ring note). */
-        if (!s_muted) {
+         * call, so it runs here on the engine thread (see the ring note).
+         * Dummy mode never talks to audsrv. */
+        if (!s_dummy && !s_muted) {
             s_muted = 1;
             audsrv_stop_audio();
         }
@@ -513,6 +560,18 @@ void ps2_audio_close(void)
         s_sema = -1;
     }
 
-    audsrv_stop_audio();
-    audsrv_quit();
+    /* Dummy mode never established an audsrv stream: calling stop/quit here
+     * could block on a wedged IOP server. */
+    if (!s_dummy) {
+        audsrv_stop_audio();
+        audsrv_quit();
+    }
+
+    PS2_LOG("[ps2] audio: closed (%s)", s_dummy ? "dummy" : "audsrv");
+    s_dummy = 0;
+}
+
+int ps2_audio_is_dummy(void)
+{
+    return s_dummy;
 }
