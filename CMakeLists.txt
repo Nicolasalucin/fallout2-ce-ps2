@@ -323,6 +323,7 @@ if(PS2)
         "src/platform/ps2/ps2_mem.c"
         "src/platform/ps2/ps2_heap.c"
         "src/platform/ps2/ps2_log.c"
+        "src/platform/ps2/ps2_mutex.c"
         "src/platform/ps2/ps2_perf.c"
         "src/platform/ps2/ps2_mem_guard.c"
         "src/platform/ps2/input_pad.c"
@@ -424,6 +425,7 @@ if(PS2)
         src/platform/ps2/ps2_time.c
         src/platform/ps2/ps2_mem.c
         src/platform/ps2/ps2_log.c
+        src/platform/ps2/ps2_mutex.c
         src/platform/ps2/ps2_perf.c
         src/platform/ps2/input_pad.c
         src/platform/ps2/video_gs.c
