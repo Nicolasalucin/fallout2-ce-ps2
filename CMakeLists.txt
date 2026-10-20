@@ -31,6 +31,7 @@ option(FALLOUT_VENDORED "Use vendored third-party libraries" ON)
 # ---------------------------------------------------------------------------
 option(PS2_BUILD "Build for the PlayStation 2 (PS2SDK cross toolchain)" OFF)
 option(PS2_DEV_SMOKE_TEST "Enable F6 smoke harness (automated acceptance test)" OFF)
+option(PS2_STRIP_ELF "Strip FALLOUT2.ELF in Release builds (disable for crash symbolization)" ON)
 if(PS2_BUILD)
     set(PS2 TRUE)
 endif()
@@ -50,15 +51,19 @@ else()
     add_executable(${EXECUTABLE_NAME} WIN32 MACOSX_BUNDLE)
 endif()
 
-# MIPS R5900 (EE) optimizations (must be after target creation):
-# -fno-exceptions -fno-rtti: reduce binary size, no C++ exceptions/RTTI used
-# -fno-pic: position-dependent code is smaller/faster on EE
-# Note: -mips3/-mgp32/-mfp32 conflict with the 64-bit EE ABI used by the SDK.
+# MIPS R5900 (EE) code-generation hardening (must be after target creation):
+# -fomit-frame-pointer: the R5900 has 32 GPRs; freeing $fp gives the register
+#   allocator one more register in the LUT/mixer hot paths.
+# -fno-pic: the ELF is a fixed-address executable, so position-independent
+#   addressing is pure overhead.
+# -fno-exceptions/-fno-rtti are C++-only; applying them to C files makes GCC
+#   warn. Note: -mips3/-mgp32/-mfp32 conflict with the 64-bit EE ABI.
 if(PS2)
     target_compile_options(${EXECUTABLE_NAME} PRIVATE
-        -fno-exceptions
-        -fno-rtti
+        -fomit-frame-pointer
         -fno-pic
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
     )
 endif()
 
@@ -416,6 +421,19 @@ if(PS2)
             COMMAND ${CMAKE_COMMAND} -E create_symlink
                     "../local_assets" "${CMAKE_CURRENT_BINARY_DIR}/local_assets"
             COMMENT "Linking local_assets next to the game ELF (PCSX2 host: root)"
+        )
+    endif()
+
+    # Release packaging: strip the final ELF. Debug symbols in this build are
+    # several megabytes and every byte is read from USB on real hardware; the
+    # loader only needs the program headers/loadable segments. This must run
+    # after linking, and only in Release: a Debug build keeps its symbols.
+    if(CMAKE_BUILD_TYPE STREQUAL "Release" AND PS2_STRIP_ELF)
+        add_custom_command(TARGET ${EXECUTABLE_NAME} POST_BUILD
+            COMMAND "${PS2DEV}/ee/bin/mips64r5900el-ps2-elf-strip"
+                    "$<TARGET_FILE:${EXECUTABLE_NAME}>"
+            COMMENT "Stripping FALLOUT2.ELF symbols (Release build)"
+            VERBATIM
         )
     endif()
 

@@ -2400,6 +2400,27 @@ int scriptRemove(int sid)
     return 0;
 }
 
+// Clears every Script's Program reference after programListFree() releases
+// all programs. Scripts flagged SCRIPT_FLAG_0x10 survive map transitions, so
+// without this they keep a dangling pointer and scriptExecProc() has to guard
+// against dereferencing freed memory.
+static void _scr_clear_program_references()
+{
+    for (int scriptType = 0; scriptType < SCRIPT_TYPE_COUNT; scriptType++) {
+        ScriptList* scriptList = &(gScriptLists[scriptType]);
+        ScriptListExtent* extent = scriptList->head;
+        while (extent != nullptr) {
+            for (int index = 0; index < extent->length; index++) {
+                Script* script = &(extent->scripts[index]);
+                script->program = nullptr;
+                script->flags &= ~SCRIPT_FLAG_0x01;
+            }
+
+            extent = extent->next;
+        }
+    }
+}
+
 // 0x4A63E0
 int _scr_remove_all()
 {
@@ -2455,6 +2476,7 @@ int _scr_remove_all()
     gMapSid = -1;
 
     programListFree();
+    _scr_clear_program_references();
     _exportClearAllVariables();
 
     return 0;

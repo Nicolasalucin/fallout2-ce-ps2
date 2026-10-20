@@ -93,7 +93,31 @@ extern void* _gp;
 #define PS2_AUDIO_CHANNELS 2
 #define PS2_AUDIO_BYTES_PER_FRAME ((PS2_AUDIO_BITS / 8) * PS2_AUDIO_CHANNELS)
 #define PS2_AUDIO_MAX_SAMPLES 2048
-#define PS2_AUDIO_STACK_SIZE (16 * 1024)
+
+/* The worker mixes and copies chunks, so it needs real stack headroom: the
+ * EE default is 4 KB and the mixer callback (SDL_AudioStream conversions)
+ * can recurse deeper than the old 16 KB budget accounted for. 32 KB is the
+ * documented safe floor for EE threads; 16-byte alignment is mandatory for
+ * the R5900 stack pointer (quadword loads/stores). */
+#define PS2_AUDIO_STACK_SIZE (32 * 1024)
+
+/* Bounce buffer for every audsrv_play_audio() dispatch.
+ *
+ * Hardware constraints this defends against:
+ *   - SIF DMA moves data in quadwords and the EE DMAC drops the low address
+ *     bits; a buffer that is not 16/64-byte aligned makes the IOP read the
+ *     wrong memory (white noise / whole-bus stall).
+ *   - The EE D-cache is write-back: data the CPU just wrote may still be in
+ *     cache when the DMAC fetches it, so the range has to be written back
+ *     before the transfer.
+ *   - One stereo S16 frame is exactly 4 bytes; a transfer whose size is not
+ *     a multiple of 4 permanently swaps the L/R channels.
+ *
+ * 64 bytes = EE cache-line size, so a chunk never shares a dirty line with
+ * unrelated data. The 4 KB slice keeps the copy small enough to stay hot in
+ * the 8 KB D-cache and matches the IOP RPC budget. */
+#define PS2_AUDIO_BOUNCE_SIZE 4096
+static unsigned char s_audio_bounce[PS2_AUDIO_BOUNCE_SIZE] __attribute__((aligned(64)));
 
 static ps2_audio_callback_t s_callback;
 static void* s_userdata;
@@ -184,6 +208,44 @@ static void audio_worker(void* arg)
     ExitDeleteThread();
 }
 
+/* Push PCM to audsrv through the aligned bounce buffer.
+ *
+ * audsrv_play_audio() currently copies the caller's bytes into its own
+ * 64-byte-aligned RPC buffer, so direct dispatch happens to work. This
+ * wrapper makes the guarantee independent of that implementation detail and
+ * is the only dispatch path in this file: every transfer is quadword-safe,
+ * cache-coherent and stereo-frame aligned even if a future caller hands us
+ * an odd pointer or byte count. */
+static void ps2_audio_feed_safe(const void* data, int size)
+{
+    const unsigned char* ptr = (const unsigned char*)data;
+
+    if (ptr == NULL || size <= 0) {
+        return;
+    }
+
+    while (size > 0) {
+        int chunk = (size > (int)sizeof(s_audio_bounce)) ? (int)sizeof(s_audio_bounce) : size;
+
+        /* Stereo S16 frames are 4 bytes: never split one across transfers. */
+        chunk &= ~3;
+        if (chunk == 0) {
+            break;
+        }
+
+        memcpy(s_audio_bounce, ptr, (size_t)chunk);
+
+        /* Write back exactly the range the DMAC will fetch; a full-cache
+         * flush would also evict unrelated mixer/FMV lines. */
+        SyncDCache(s_audio_bounce, s_audio_bounce + chunk);
+
+        audsrv_play_audio((const char*)s_audio_bounce, chunk);
+
+        ptr += chunk;
+        size -= chunk;
+    }
+}
+
 void ps2_audio_pump(void)
 {
     static uint32_t s_last_pump_ms;
@@ -214,14 +276,15 @@ void ps2_audio_pump(void)
 
     s_muted = 0;
 
-    /* Feed as much as the SPU2 ring has room for; audsrv_play_audio copies
-     * into the IOP ring and truncates, it never blocks. */
+    /* Feed as much as the SPU2 ring has room for; each chunk goes through
+     * the aligned, cache-coherent bounce buffer and audsrv truncates instead
+     * of blocking. */
     while (fed < PS2_AUDIO_RING_CHUNKS && s_ring_head != s_ring_tail) {
         if (audsrv_available() < s_chunk_bytes) {
             break;
         }
 
-        audsrv_play_audio((const char*)s_ring[s_ring_head % PS2_AUDIO_RING_CHUNKS], s_chunk_bytes);
+        ps2_audio_feed_safe(s_ring[s_ring_head % PS2_AUDIO_RING_CHUNKS], s_chunk_bytes);
 
         __asm__ volatile("" ::: "memory");
         s_ring_head++;

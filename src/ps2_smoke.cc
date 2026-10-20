@@ -102,6 +102,13 @@ int ps2_smoke_ai_set_called_freq(Object* critter, int freq);
 /* Defined in game_sound.cc but missing from game_sound.h. */
 int ps2_smoke_sound_effects_get_volume(void);
 
+/* Deferred SIF diagnostic (ps2sdk libkernel, smoke builds only): the SIF
+ * command handler records an invalid completion, and this thread-context
+ * call prints it later without taking stdio locks inside the interrupt.
+ * Weak so the game still links against a stock ps2sdk; the patched kernel
+ * provides the symbol and the call below enables the diagnostic. */
+extern "C" void sceSifRpcDumpInvalidCompletion(void) __attribute__((weak));
+
 /* ---- Logging / failure bookkeeping ---- */
 
 #define SMOKE_LOG(...)                            \
@@ -1437,14 +1444,12 @@ static bool smoke_act_save_load(void)
             { 2400, SMOKE_IN_KEY, SDL_SCANCODE_Y },
             { 3600, SMOKE_IN_PAD, PAD_CROSS },
             { 4400, SMOKE_IN_PAD, PAD_START },
-            { 6000, SMOKE_IN_KEY, SDL_SCANCODE_RETURN },
-            { 9000, SMOKE_IN_KEY, SDL_SCANCODE_ESCAPE },
         };
 
         lsgSetSlotCursor(0);
         smoke_step_begin2("save", SMOKE_SLOW_STEP_TIMEOUT_MS);
         smoke_ui_watch_begin("save-ui", GameMode::kSaveGame);
-        smoke_script_arm(steps, 6);
+        smoke_script_arm(steps, 4);
         int rc = lsgSaveGame(LOAD_SAVE_MODE_NORMAL);
         smoke_script_clear();
         smoke_ui_watch_finish("save-ui");
@@ -1465,8 +1470,9 @@ static bool smoke_act_save_load(void)
         int sizeAfter = smoke_read_save_description(descAfter, sizeof(descAfter));
         if (sizeAfter <= 0) {
             smoke_fail("save: SAVE.DAT is missing in slot 01");
-        } else if (strcmp(descAfter, descBefore) == 0) {
-            smoke_fail("save: the OSK-typed comment was not persisted ('%s')", descAfter);
+        } else if (sizeAfter != 6 || strncmp(descAfter, "SMOKE", 5) != 0) {
+            smoke_fail("save: the OSK-typed comment was not persisted (expected 6 chars 'SMOKE?', got %d '%s')",
+                sizeAfter, descAfter);
         }
         SMOKE_LOG("save: slot 01 after: size=%d description='%s'", sizeAfter, descAfter);
     }
@@ -1767,6 +1773,11 @@ int ps2_smoke_main(void)
 static void smoke_tick_impl(void)
 {
     unsigned int now;
+
+    /* Print any invalid SIF completion recorded by the interrupt handler. */
+    if (sceSifRpcDumpInvalidCompletion != nullptr) {
+        sceSifRpcDumpInvalidCompletion();
+    }
 
     if (!s_active) {
         return;

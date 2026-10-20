@@ -96,6 +96,39 @@ static DIR* fs_opendir(const char* dir)
     return d;
 }
 
+#ifdef PS2_DEV_SMOKE_TEST
+/* The dialog tree is the largest directory the engine resolves during map
+ * load and the one that intermittently wedges in PCSX2's host filesystem
+ * HLE. Keep a per-entry trace here, but only for that tree, so a full boot
+ * log stays readable. */
+static int fs_trace_dialog_dir(const char* dir)
+{
+    return dir != NULL && strstr(dir, "data/text/english/dialog") != NULL;
+}
+
+static struct dirent* fs_trace_readdir(DIR* d, const char* dir, int index)
+{
+    struct dirent* entry;
+
+    if (!fs_trace_dialog_dir(dir)) {
+        return readdir(d);
+    }
+
+    printf("[ps2] fs: dialog readdir #%d begin\n", index);
+    entry = readdir(d);
+    if (entry != NULL) {
+        printf("[ps2] fs: dialog readdir #%d -> '%s' (type %d)\n",
+            index, entry->d_name, (int)entry->d_type);
+    } else {
+        printf("[ps2] fs: dialog readdir #%d -> NULL\n", index);
+    }
+
+    return entry;
+}
+#else
+#define fs_trace_readdir(d, dir, index) readdir(d)
+#endif
+
 /* Copies `path` into `out` normalizing separators: backslashes to slashes,
  * leading "./" stripped. */
 static void fs_normalize(const char* path, char* out, int out_size)
@@ -265,16 +298,28 @@ const char* ps2_fs_root_path(int index)
  * directories (data/ART/INTRFACE, the text dialog trees) are cached too; names
  * are stored compactly, and the total memory cost is bounded by the arena.
  */
-#define PS2_FS_DIR_CACHE_SLOTS 32
-#define PS2_FS_DIR_CACHE_TTL_MS 4000
-/* PS2 port: 192 KB of static arena for resolved-directory caching. It lives
+/* The engine resolves each proto/art path through several roots and save
+ * overlays, so the working set is much larger than the handful of game-data
+ * directories: the old 32-slot/4-second cache thrashed during proto loading
+ * and sent a dopen/readdir burst to the IOP for every file. The PCSX2 host
+ * filesystem HLE is known to corrupt its SIF RPC bookkeeping under exactly
+ * that burst. Keep a session-sized working set and a longer TTL; explicit
+ * writes still invalidate their own directory (ps2_fs_invalidate_parent_of),
+ * so save listings stay coherent. */
+#define PS2_FS_DIR_CACHE_SLOTS 96
+#define PS2_FS_DIR_CACHE_TTL_MS 30000
+/* PS2 port: 320 KB of static arena for resolved-directory caching. It lives
  * in .bss, so every byte taken here is taken from the engine heap, but the
  * arena also decides how often the whole listing cache is dropped: shrinking
  * it too far trades a few KB of heap for a lot of extra opendir/readdir RPC
  * traffic, and host: directory storms are exactly what trips the PCSX2
  * filesystem HLE (see the file header). */
-#define PS2_FS_DIR_CACHE_ARENA (192 * 1024)
+#define PS2_FS_DIR_CACHE_ARENA (320 * 1024)
 #define PS2_FS_DIR_CACHE_NAME_MAX 255
+/* Safety valve for a driver that never returns NULL from readdir(). A
+ * legitimate listing (the dialog tree is the largest one in the game data)
+ * is far below this limit. */
+#define PS2_FS_DIR_CACHE_MAX_ENTRIES 4096
 
 typedef struct {
     char path[PS2_FS_PATH_MAX];
@@ -579,6 +624,10 @@ static fs_dir_cache_slot_t* fs_dir_cache_fill(const char* dir)
     DIR* d;
     int start;
     int count = 0;
+    int index = 0;
+#ifdef PS2_DEV_SMOKE_TEST
+    int trace = 0;
+#endif
 
     /* Reclaim the arena in one go once it is mostly used: listings are only
      * re-read on demand, so dropping all of them is cheap. */
@@ -591,11 +640,24 @@ static fs_dir_cache_slot_t* fs_dir_cache_fill(const char* dir)
         return NULL;
     }
 
+#ifdef PS2_DEV_SMOKE_TEST
+    trace = fs_trace_dialog_dir(dir);
+    if (trace) {
+        printf("[ps2] fs: dialog dopen %s -> ok\n", dir);
+    }
+#endif
+
     start = s_dir_arena_used;
 
-    while ((entry = readdir(d)) != NULL) {
-        size_t len = strlen(entry->d_name) + 1;
+    while ((entry = fs_trace_readdir(d, dir, index)) != NULL) {
+        size_t len;
 
+        if (count >= PS2_FS_DIR_CACHE_MAX_ENTRIES) {
+            count = -1;
+            break;
+        }
+
+        len = strlen(entry->d_name) + 1;
         if (len > PS2_FS_DIR_CACHE_NAME_MAX
             || s_dir_arena_used + 1 + (int)len > PS2_FS_DIR_CACHE_ARENA) {
             count = -1;
@@ -606,9 +668,21 @@ static fs_dir_cache_slot_t* fs_dir_cache_fill(const char* dir)
         memcpy(&s_dir_arena[s_dir_arena_used], entry->d_name, len);
         s_dir_arena_used += (int)len;
         count++;
+        index++;
     }
 
+#ifdef PS2_DEV_SMOKE_TEST
+    if (trace) {
+        printf("[ps2] fs: dialog dclose %s after %d entries (count=%d)\n",
+            dir, index, count);
+    }
+#endif
     closedir(d);
+#ifdef PS2_DEV_SMOKE_TEST
+    if (trace) {
+        printf("[ps2] fs: dialog dclose %s done\n", dir);
+    }
+#endif
 
     if (count < 0) {
         s_dir_arena_used = start;
@@ -633,6 +707,8 @@ typedef struct {
     int index;
     int cursor; /* arena offset of the next entry (cached listings) */
     DIR* dir; /* direct iteration, when the directory is not cacheable */
+    const char* dir_path; /* caller's path, for the diagnostic trace */
+    int readdir_index;
 } fs_dir_iter_t;
 
 static int fs_dir_iter_begin(fs_dir_iter_t* it, const char* dir)
@@ -643,6 +719,8 @@ static int fs_dir_iter_begin(fs_dir_iter_t* it, const char* dir)
     it->index = 0;
     it->cursor = 0;
     it->dir = NULL;
+    it->dir_path = dir;
+    it->readdir_index = 0;
 
     if (slot == NULL) {
 #ifdef PS2_DEV_SMOKE_TEST
@@ -688,7 +766,16 @@ static const char* fs_dir_iter_next(fs_dir_iter_t* it, unsigned char* kind)
     }
 
     {
-        struct dirent* entry = readdir(it->dir);
+        struct dirent* entry;
+
+        /* The direct fallback is used when the listing did not fit the cache
+         * (or hit the runaway guard above); keep the same bound here so a
+         * broken driver cannot trap the resolver in an endless scan. */
+        if (it->readdir_index >= PS2_FS_DIR_CACHE_MAX_ENTRIES) {
+            return NULL;
+        }
+
+        entry = fs_trace_readdir(it->dir, it->dir_path, it->readdir_index++);
         if (entry == NULL) {
             return NULL;
         }
@@ -701,6 +788,11 @@ static const char* fs_dir_iter_next(fs_dir_iter_t* it, unsigned char* kind)
 static void fs_dir_iter_end(fs_dir_iter_t* it)
 {
     if (it->dir != NULL) {
+#ifdef PS2_DEV_SMOKE_TEST
+        if (fs_trace_dialog_dir(it->dir_path)) {
+            printf("[ps2] fs: dialog iter dclose %s\n", it->dir_path);
+        }
+#endif
         closedir(it->dir);
         it->dir = NULL;
     }

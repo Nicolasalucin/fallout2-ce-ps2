@@ -35,6 +35,14 @@ set(CMAKE_CXX_COMPILER mips64r5900el-ps2-elf-g++)
 set(EE_CFLAGS "-I${PS2SDK}/ee/include -I${PS2SDK}/common/include -I${PS2DEV}/gsKit/include -I${PS2SDK}/ports/include -D_EE -DPS2 -D__PS2__ -G0" CACHE STRING "EE C compiler flags" FORCE)
 set(EE_LDFLAGS "-L${PS2SDK}/ee/lib -L${PS2DEV}/gsKit/lib -L${PS2SDK}/ports/lib -Wl,-zmax-page-size=128 -T${PS2SDK}/ee/startup/linkfile" CACHE STRING "EE linker flags" FORCE)
 
+# An empty CMAKE_BUILD_TYPE is a real hazard here: CMake then emits no
+# optimization flags at all (-O0), the Release-only ee-strip POST_BUILD step
+# never runs, and PS2_DEBUG_VERBOSE stays enabled. Default to Release; pass
+# -DCMAKE_BUILD_TYPE=Debug explicitly when a debugger build is wanted.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+endif()
+
 # Build type flags
 set(CMAKE_C_FLAGS_DEBUG "-Og -g")
 set(CMAKE_CXX_FLAGS_DEBUG "-Og -g")

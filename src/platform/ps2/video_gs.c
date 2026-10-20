@@ -154,29 +154,37 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
          * palette snapshot is taken right here, so the pair is coherent). */
         capture_maybe_dump(indices, ps2_osk_is_open());
 
+        /* Frame-buffer lifetime barrier: gsKit_texture_send() already waits
+         * for the GIF DMA to finish before returning, but make the contract
+         * explicit here because the next step overwrites s_fb_rgba while the
+         * DMAC may still be reading it. */
+        dmaKit_wait_fast();
+
         /* Paletted -> CT32 on the EE (Option A): one LUT read per pixel.
          * s_palette is already in GS CT32 byte order (A B G R), so every
          * entry can be stored verbatim. No GS CLUT involved.
          *
          * Loop unrolled 8x for EE (MIPS R5900) superscalar dispatch.
          * Indices are 8-bit; loads are byte-wide, stores are 32-bit aligned.
-         * Manual unroll avoids compiler's conservative alias assumptions. */
-        u32* dst = s_fb_rgba;
-        const u32* lut = s_palette;
+         * `restrict` lets GCC schedule the LUT loads and the 32-bit stores
+         * without conservative alias barriers. */
+        u32* restrict dst = s_fb_rgba;
+        const u32* restrict lut = s_palette;
+        const u8* restrict src = indices;
         const int pixel_count = PS2_SCR_W * PS2_SCR_H;
         int i = 0;
         for (; i + 7 < pixel_count; i += 8) {
-            dst[i + 0] = lut[indices[i + 0]];
-            dst[i + 1] = lut[indices[i + 1]];
-            dst[i + 2] = lut[indices[i + 2]];
-            dst[i + 3] = lut[indices[i + 3]];
-            dst[i + 4] = lut[indices[i + 4]];
-            dst[i + 5] = lut[indices[i + 5]];
-            dst[i + 6] = lut[indices[i + 6]];
-            dst[i + 7] = lut[indices[i + 7]];
+            dst[i + 0] = lut[src[i + 0]];
+            dst[i + 1] = lut[src[i + 1]];
+            dst[i + 2] = lut[src[i + 2]];
+            dst[i + 3] = lut[src[i + 3]];
+            dst[i + 4] = lut[src[i + 4]];
+            dst[i + 5] = lut[src[i + 5]];
+            dst[i + 6] = lut[src[i + 6]];
+            dst[i + 7] = lut[src[i + 7]];
         }
         for (; i < pixel_count; i++) {
-            dst[i] = lut[indices[i]];
+            dst[i] = lut[src[i]];
         }
 
         /* F8: composite the on-screen keyboard over the freshly built
@@ -187,10 +195,12 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
 
         s_texture.Mem = (u32*)s_fb_rgba;
 
-        /* Write back only the framebuffer range that DMA will consume.
-         * s_fb_rgba is 64-byte aligned, size = 640*480*4 = 1,228,800 bytes.
-         * FlushCache(0) is a full-cache writeback; use range flush for EE. */
-        FlushCache(0);  /* Full flush is still fastest on EE for large ranges; range flush adds loop overhead. */
+        /* Write back exactly the framebuffer range that the GIF DMAC will
+         * fetch. The texture spans 640*480*4 = 1,228,800 bytes; flushing the
+         * whole D-cache here would also write back mixer/file buffers for no
+         * benefit (gsKit_texture_send does its own writeback as a safety net,
+         * so this explicit call is the precise one that matters). */
+        SyncDCache((void*)s_fb_rgba, (void*)(s_fb_rgba + pixel_count));
         gsKit_texture_upload(s_gs, &s_texture);
         t1 = ps2_time_ms();
 

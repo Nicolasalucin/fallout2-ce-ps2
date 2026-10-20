@@ -22,6 +22,7 @@
 #include "game_sound.h"
 #include "input.h"
 #include "interface.h"
+#include "interpreter_lib.h"
 #include "item.h"
 #include "kb.h"
 #include "lips.h"
@@ -628,10 +629,28 @@ static void gameDialogRedButtonsExit();
 static bool gGameDialogFix;
 static bool gNumberOptions;
 
+// The reply program is owned by the script engine and can be freed on a map
+// change while a dialogue is still winding down. `gDialogReplyProgram` is not
+// part of any window/nevs registration, so without this callback a later
+// option click would execute bytecode from freed memory (seen on PCSX2 as a
+// low-address TLB miss in `_executeProcedure`).
+static void gameDialogRemoveProgramReferences(Program* program)
+{
+    if (gDialogReplyProgram == program) {
+        printf("[ps2] dialog: dropping reply program %p\n", (void*)program);
+        gDialogReplyProgram = nullptr;
+        gDialogReplyMessageListId = -1;
+        gDialogReplyMessageId = -1;
+        gGameDialogOptionEntriesLength = 0;
+    }
+}
+
 // gdialog_init
 // 0x444D1C
 int gameDialogInit()
 {
+    intLibRegisterProgramDeleteCallback(gameDialogRemoveProgramReferences);
+
     // SFALL: Prevents from using 0 to escape from dialogue at any time.
     gGameDialogFix = true;
     configGetBool(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_GAME_DIALOG_FIX_KEY, &gGameDialogFix);

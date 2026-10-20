@@ -2311,9 +2311,21 @@ void intLibRegisterProgramDeleteCallback(IntLibProgramDeleteCallback* callback)
 // 0x467040
 void intLibRemoveProgramReferences(Program* program)
 {
+    // The generic key handler is stored separately from the per-key table.
+    // A map script can install it and then be freed by a map transition; if
+    // the pointer is left behind, the next key press dispatches bytecode from
+    // freed memory through `_executeProc`.
+    if (program == gIntLibGenericKeyHandlerProgram) {
+        printf("[ps2] intlib: dropping generic key handler (program=%p, proc=%d)\n",
+            (void*)program, gIntLibGenericKeyHandlerProc);
+        gIntLibGenericKeyHandlerProgram = nullptr;
+        gIntLibGenericKeyHandlerProc = 0;
+    }
+
     for (int index = 0; index < INT_LIB_KEY_HANDLERS_CAPACITY; index++) {
         if (program == gIntLibKeyHandlerEntries[index].program) {
             gIntLibKeyHandlerEntries[index].program = nullptr;
+            gIntLibKeyHandlerEntries[index].proc = 0;
         }
     }
 

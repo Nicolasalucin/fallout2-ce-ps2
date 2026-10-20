@@ -134,6 +134,18 @@ static void interpreterPrintStats();
 // 0x50942C
 static char _aCouldnTFindPro[] = "<couldn't find proc>";
 
+#ifdef __PS2__
+// EE user RAM. A Program and its tables are allocated from the engine heap;
+// anything below 1 MB is a null/low pointer and anything at or above 32 MB is
+// the uncached/kernel aliases, neither of which can hold a valid object.
+static bool interpreterPointerIsUserRam(const void* ptr)
+{
+    unsigned int p = (unsigned int)ptr;
+
+    return p >= 0x00100000u && p < 0x02000000u;
+}
+#endif
+
 // sayTimeoutMsg
 // 0x519038
 int _TimeOut = 0;
@@ -416,10 +428,14 @@ static void _detachProgram(Program* program)
 // 0x4675F4
 static void _purgeProgram(Program* program)
 {
-    if (!program->exited) {
-        intLibRemoveProgramReferences(program);
-        program->exited = true;
-    }
+    // Cleanup must run even when the script already marked itself as exited.
+    // `_updatePrograms` frees exited scripts immediately, so gating this on
+    // `!program->exited` skipped every delete callback for the normal script
+    // shutdown path and left window/dialog/key-handler references pointing at
+    // freed memory. The callbacks are idempotent and only clear references
+    // that still match this Program.
+    intLibRemoveProgramReferences(program);
+    program->exited = true;
 }
 
 // 0x467614
@@ -2813,6 +2829,31 @@ void _executeProc(Program* program, int procedureIndex)
     int procedureFlags;
     char err[256];
 
+    // See the matching guard in `_executeProcedure`: event/window callbacks can
+    // outlive the Program they were registered with (the dialog reply program
+    // is the common case). Executing bytecode through a destroyed Program is
+    // a low-address TLB miss under the strict profile and a hard crash on real
+    // hardware.
+    if (program == nullptr
+#ifdef __PS2__
+        || !interpreterPointerIsUserRam(program)
+        || !interpreterPointerIsUserRam(program->procedures)
+        || !interpreterPointerIsUserRam(program->stackValues)
+        || !interpreterPointerIsUserRam(program->returnStackValues)
+#endif
+        || program->procedures == nullptr
+        || program->stackValues == nullptr
+        || program->returnStackValues == nullptr) {
+        printf("[ps2] interpreter: _executeProc on %p (procedures=%p stack=%p rstack=%p, proc=%d, caller=%p)\n",
+            (void*)program,
+            program != nullptr ? (void*)program->procedures : nullptr,
+            program != nullptr ? (void*)program->stackValues : nullptr,
+            program != nullptr ? (void*)program->returnStackValues : nullptr,
+            procedureIndex,
+            __builtin_return_address(0));
+        return;
+    }
+
     procedurePtr = program->procedures + 4 + sizeof(Procedure) * procedureIndex;
     procedureFlags = stackReadInt32(procedurePtr, offsetof(Procedure, flags));
     if ((procedureFlags & PROCEDURE_FLAG_IMPORTED) != 0) {
@@ -2894,6 +2935,33 @@ void _executeProcedure(Program* program, int procedureIndex)
 #else
     jmp_buf env;
 #endif
+
+    // A freed or partially initialized Program must never reach the bytecode
+    // reader: without `procedures` every offset is relative to a low/null
+    // address, which the strict PS2 profile reports as a TLB miss and which
+    // would be a hard fault on real hardware. Keep the VM alive, but make the
+    // bad caller visible instead of executing garbage. The range checks also
+    // catch a freed Program whose fields were overwritten by allocator data
+    // (non-null but low pointers).
+    if (program == nullptr
+#ifdef __PS2__
+        || !interpreterPointerIsUserRam(program)
+        || !interpreterPointerIsUserRam(program->procedures)
+        || !interpreterPointerIsUserRam(program->stackValues)
+        || !interpreterPointerIsUserRam(program->returnStackValues)
+#endif
+        || program->procedures == nullptr
+        || program->stackValues == nullptr
+        || program->returnStackValues == nullptr) {
+        printf("[ps2] interpreter: _executeProcedure on %p (procedures=%p stack=%p rstack=%p, proc=%d, caller=%p)\n",
+            (void*)program,
+            program != nullptr ? (void*)program->procedures : nullptr,
+            program != nullptr ? (void*)program->stackValues : nullptr,
+            program != nullptr ? (void*)program->returnStackValues : nullptr,
+            procedureIndex,
+            __builtin_return_address(0));
+        return;
+    }
 
     procedurePtr = program->procedures + 4 + sizeof(Procedure) * procedureIndex;
     procedureFlags = stackReadInt32(procedurePtr, offsetof(Procedure, flags));
@@ -3151,6 +3219,14 @@ static void interpreterPrintStats()
 
 void programStackPushValue(Program* program, ProgramValue& programValue)
 {
+    if (program == nullptr || program->stackValues == nullptr) {
+        printf("[ps2] interpreter: value-stack push on %p (stack=%p, caller=%p)\n",
+            (void*)program,
+            program != nullptr ? (void*)program->stackValues : nullptr,
+            __builtin_return_address(0));
+        return;
+    }
+
     if (program->stackValues->size() > 0x1000) {
         programFatalError("programStackPushValue: Stack overflow.");
     }
@@ -3197,6 +3273,14 @@ void programStackPushPointer(Program* program, void* value)
 
 ProgramValue programStackPopValue(Program* program)
 {
+    if (program == nullptr || program->stackValues == nullptr) {
+        printf("[ps2] interpreter: value-stack pop on %p (stack=%p, caller=%p)\n",
+            (void*)program,
+            program != nullptr ? (void*)program->stackValues : nullptr,
+            __builtin_return_address(0));
+        return ProgramValue();
+    }
+
     if (program->stackValues->empty()) {
         programFatalError("programStackPopValue: Stack underflow.");
     }
@@ -3257,6 +3341,16 @@ void* programStackPopPointer(Program* program)
 
 void programReturnStackPushValue(Program* program, ProgramValue& programValue)
 {
+    // Same lifetime hazard as `_executeProcedure`: a stale Program can have
+    // its vectors already destroyed, leaving a null `returnStackValues`.
+    if (program == nullptr || program->returnStackValues == nullptr) {
+        printf("[ps2] interpreter: return-stack push on %p (stack=%p, caller=%p)\n",
+            (void*)program,
+            program != nullptr ? (void*)program->returnStackValues : nullptr,
+            __builtin_return_address(0));
+        return;
+    }
+
     if (program->returnStackValues->size() > 0x1000) {
         programFatalError("programReturnStackPushValue: Stack overflow.");
     }
@@ -3287,6 +3381,14 @@ void programReturnStackPushPointer(Program* program, void* value)
 
 ProgramValue programReturnStackPopValue(Program* program)
 {
+    if (program == nullptr || program->returnStackValues == nullptr) {
+        printf("[ps2] interpreter: return-stack pop on %p (stack=%p, caller=%p)\n",
+            (void*)program,
+            program != nullptr ? (void*)program->returnStackValues : nullptr,
+            __builtin_return_address(0));
+        return ProgramValue();
+    }
+
     if (program->returnStackValues->empty()) {
         programFatalError("programReturnStackPopValue: Stack underflow.");
     }

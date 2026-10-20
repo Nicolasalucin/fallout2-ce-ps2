@@ -2369,6 +2369,13 @@ static int _GetComment(int slot)
         memset(description, '\0', LOAD_SAVE_DESCRIPTION_LENGTH);
     }
 
+#ifdef PS2_DEV_SMOKE_TEST
+    /* The smoke harness types one OSK character and then checks the persisted
+     * comment. Start from a short known value so the field always has room,
+     * even when the previous run left it at maxLength. */
+    strcpy(description, "SMOKE");
+#endif
+
     int rc;
 
     int backgroundColor = *(_loadsaveFrmImages[LOAD_SAVE_FRM_BOX].getData() + _loadsaveFrmImages[LOAD_SAVE_FRM_BOX].getWidth() * 35 + 24);
