@@ -33,9 +33,7 @@
 /data/
 /mods/
 /saves/
-/build_ps2/
-/build_ps2_smoke/
-/build_ps2_release/
+/build_ps2*/
 /build/
 /host/
 
@@ -50,6 +48,7 @@
 
 # === Release packaging (uploaded to GitHub Releases, not committed) ===
 /dist/*.zip
+/*.zip
 
 # === Runtime droppings ===
 fallout2.cfg

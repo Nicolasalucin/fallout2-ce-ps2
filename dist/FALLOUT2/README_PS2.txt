@@ -2,6 +2,7 @@ Fallout 2: A Post Nuclear Role Playing Game
 PS2 Port - Classic Edition
 
 Build: Classic Edition (fallout2-ce-ps2)
+Version: 1.0 STABLE (release v1.0.0-ps2)
 Platform: PlayStation 2 (NTSC)
 Media: DVD-R / USB (mass:) / MX4SIO / HDD (PFS)
 
@@ -58,6 +59,21 @@ RENDIMIENTO / PERFORMANCE
 - Abrir UI (Pip-Boy, Inventario): < 150ms
 - Emulador PCSX2: Usa modo "Strict" (sin speedhacks) para test real
 
+Optimizaciones de la version 1.0:
+- Cache direct-mapped de 1024 slots para art/cache lookup: reduce el
+  frame time hasta un 36% en mapas densos (Den, Klamath, NCR, San Francisco).
+- SIF RPC blindado: sin saltos a punteros de callback arbitrarios en
+  _request_end; recuperacion determinista para fileio.
+- Audio/VFS endurecidos: bounce buffer alineado + SyncDCache y cache de
+  directorios ampliada.
+- Binario de produccion Release stripped, sin contadores de instrumentacion.
+- Validado 3/3 en perfil hyper-strict de PCSX2 (sin fastmem, FPU/VU clamp 3,
+  0 TLB misses).
+
+Referencia medida en PCSX2 strict (puede variar en hardware real):
+- DENBUS1 ~52 FPS, NEWR1 ~43 FPS, SFTANKER ~43 FPS,
+  KLAMALL ~38 FPS, NCRENT ~34 FPS.
+
 ================================================================================
 PROBLEMAS CONOCIDOS / KNOWN ISSUES
 ================================================================================
@@ -65,7 +81,31 @@ PROBLEMAS CONOCIDOS / KNOWN ISSUES
 - Intros MVE: Paleta restaurada correctamente tras video
 - OSK (teclado virtual): Funciona para nombres de save
 - Skilldex: Arreglado (antes TLB Miss / unaligned address)
-- Tour de mapas: ~13 FPS en emulador (target 45 FPS en hardware real)
+- Tour de mapas: entre ~34 y ~52 FPS en PCSX2 strict segun el mapa
+  (NCRENT es el mas pesado por su primer frame de carga)
+- Si un mapa se cuelga en hardware real, adjunta el debug.log (ver abajo)
+
+================================================================================
+REPORTE DE ERRORES / CRASH REPORTS
+================================================================================
+
+El build de produccion mantiene el log de diagnostico del port PS2:
+
+  mass:/FALLOUT2/debug.log   (USB / MX4SIO, destino normal)
+  mc0:/FALLOUT2/debug.log    (Memory Card, fallback automatico)
+
+Cada linea se escribe, se vuelca a disco y se cierra al instante, por lo que
+ante un CUELLE o pantalla negra el archivo conserva la ultima actividad.
+
+Si el juego crashea:
+1. Copia debug.log del USB/Memory Card.
+2. Indica modelo de PS2, metodo de carga (OPL/uLaunchELF/ESR),
+   mapa donde ocurrio y version del ELF.
+3. Adjunta el archivo en un issue:
+   https://github.com/nicolasalucin/fallout2-ce-ps2/issues
+
+En PCSX2 no se usa host: para el log (evita el bug de hostfs en Strict); en
+el emulador la misma linea sale por consola y queda en el log de PCSX2.
 
 ================================================================================
 CREDITOS / CREDITS
@@ -80,6 +120,8 @@ PS2 Port: Nicolas Salucin (nicolasalucin)
   - DMA sincronizado + double-buffer CLUT VRAM
   - Audio audsrv + IRX modules
   - Input DualShock 2 + pad emulation
+  - v1.0: cache direct-mapped de art, guard SIF RPC, VFS/audio endurecidos
+  - v1.0: telemetria de crash montada sobre mass:/ y mc0:/ (debug.log)
 
 AI-Assisted Development:
   - Arquitectura bajo nivel (Gemini / DeepSeek / Claude via OpenCode)
