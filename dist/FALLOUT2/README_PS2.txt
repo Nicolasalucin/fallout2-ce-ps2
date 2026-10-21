@@ -2,7 +2,7 @@ Fallout 2: A Post Nuclear Role Playing Game
 PS2 Port - Classic Edition
 
 Build: Classic Edition (fallout2-ce-ps2)
-Version: 1.0 STABLE (release v1.0.0-ps2)
+Version: 1.0.1 STABLE (release v1.0.1-ps2)
 Platform: PlayStation 2 (NTSC)
 Media: DVD-R / USB (mass:) / MX4SIO / HDD (PFS)
 
@@ -92,6 +92,7 @@ REPORTE DE ERRORES / CRASH REPORTS
 El build de produccion mantiene el log de diagnostico del port PS2:
 
   mass:/FALLOUT2/debug.log   (USB / MX4SIO, destino normal)
+  mass:/debug.log            (fallback si el juego esta en raiz del pendrive)
   mc0:/FALLOUT2/debug.log    (Memory Card, fallback automatico)
 
 Cada linea se escribe, se vuelca a disco y se cierra al instante, por lo que
@@ -108,6 +109,16 @@ Sincronizacion periodica (PS2_DEBUG_SYNC_MS = 5000):
 Cada 5 s (en SDL_RenderPresent) se fuerza un cierre/reapertura del log
 para vaciar la write-back cache de usbhdfsd y persistir el tamano en FAT.
 Esto asegura que el debug.log sea legible tras un cuelgue repentino.
+
+--- ARRANQUE BLINDADO EN PS2 SLIM (SCPH-700xx) ---
+En hardware real, los drivers usbd.irx + usbhdfsd.irx tardan 1.5-4s en
+negociar el pendrive USB 1.1 y montar mass:. Si el juego intenta leer
+assets antes, hace exit() limpio a boot.elf (pantalla negra sin debug.log).
+Este build incluye:
+  * Sondeo activo de mass:/ con timeout 4.5s (15 reintentos x 300ms)
+  * Redireccion de debug.log SOLO tras confirmar mass: montado
+  * Log preventivo + flush + pausa 3s antes de salir si faltan assets
+  * setvbuf(stdout/stderr, _IONBF) para escritura inmediata
 
 Si el juego crashea:
 1. Copia debug.log del USB/Memory Card.
@@ -134,6 +145,8 @@ PS2 Port: Nicolas Salucin (nicolasalucin)
   - Input DualShock 2 + pad emulation
   - v1.0: cache direct-mapped de art, guard SIF RPC, VFS/audio endurecidos
   - v1.0: telemetria de crash montada sobre mass:/ y mc0:/ (debug.log)
+  - v1.0.1: arranque blindado PS2 Slim (sondeo mass:/ 4.5s, debug.log seguro,
+    flush+pause 3s ante assets faltantes, _IONBF en stdout/stderr)
 
 AI-Assisted Development:
   - Arquitectura bajo nivel (Gemini / DeepSeek / Claude via OpenCode)

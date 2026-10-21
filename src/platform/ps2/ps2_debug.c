@@ -48,6 +48,7 @@ static uint32_t s_last_sync_ms;
 
 static const char* const s_candidates[] = {
     "mass:/FALLOUT2/debug.log",
+    "mass:/debug.log",
     "mc0:/FALLOUT2/debug.log",
 };
 static const int s_candidate_count = (int)(sizeof(s_candidates) / sizeof(s_candidates[0]));

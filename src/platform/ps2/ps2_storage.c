@@ -18,9 +18,11 @@
 
 #include <delaythread.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <loadfile.h>
 #include <sifrpc.h>
@@ -264,18 +266,36 @@ void ps2_storage_init(const char* argv0)
     SifLoadModule("rom0:MCMAN", 0, NULL);
     SifLoadModule("rom0:MCSERV", 0, NULL);
 
-    /* Wait for mass: to become ready (up to 20s). On real hardware this succeeds
-     * immediately; on PCSX2 the fs.c workarounds handle the readdir hang. */
+    /* ACTIVE POLLING LOOP FOR mass: WITH TIMEOUT
+     * On real PS2 Slim hardware, the USB 1.1 bus + usbhdfsd.irx need 1.5-4s to
+     * negotiate the pendrive, read the MBR, and register the mass: mount point.
+     * If we return too early, the game tries to read assets before mass: exists,
+     * causing a clean exit() back to boot.elf (race condition).
+     * Poll with 300ms intervals for up to ~4.5s (15 retries). */
     {
         int tries;
-        DIR* d;
-        for (tries = 0; tries < 40; tries++) {
-            d = opendir("mass:/");
-            if (d != NULL) {
-                closedir(d);
+        int fd;
+        int mass_ready = 0;
+
+        printf("[ps2] storage: waiting for mass: to settle (USB 1.1)...\n");
+        PS2_LOG("[ps2] storage: waiting for mass: to settle (USB 1.1)...");
+
+        for (tries = 0; tries < 15; tries++) {
+            fd = open("mass:/", O_RDONLY);
+            if (fd >= 0) {
+                close(fd);
+                mass_ready = 1;
                 break;
             }
-            DelayThread(500000);
+            DelayThread(300000); /* 300ms */
+        }
+
+        if (mass_ready) {
+            printf("[ps2] storage: mass: ready after %d attempt(s)\n", tries + 1);
+            PS2_LOG("[ps2] storage: mass: ready after %d attempt(s)", tries + 1);
+        } else {
+            printf("[ps2] storage: WARNING mass: did not settle in time (timeout)\n");
+            PS2_LOG("[ps2] storage: WARNING mass: did not settle in time (timeout)");
         }
     }
 

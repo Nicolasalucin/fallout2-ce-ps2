@@ -12,6 +12,7 @@
 #include "ps2_storage.h"
 #include "ps2_time.h"
 
+#include <delaythread.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -243,7 +244,14 @@ void ps2_fs_init(void)
         return;
     }
 
-    printf("[ps2] fs: WARNING no game data root found\n");
+    /* NO GAME DATA ROOT FOUND - CRITICAL ERROR
+     * Print detailed diagnostics, flush all streams, and sleep to allow
+     * USB driver to sync FAT32 sectors before returning (which may lead
+     * to a clean exit back to boot.elf). */
+    printf("[FATAL] No se pudo abrir MASTER.DAT en mass:/FALLOUT2/ o mass:/\n");
+    printf("[FATAL] Verifique que los archivos esten en MAYUSCULAS y el pendrive en FAT32/MBR.\n");
+    fflush(stdout);
+    fflush(stderr);
 
     /* Fail diagnostics: what does the PCSX2 host: root expose? */
     {
@@ -263,6 +271,19 @@ void ps2_fs_init(void)
             }
             printf("\n");
             closedir(d);
+        }
+    }
+
+    /* Force physical write to USB (flush FAT32 sectors) before returning.
+     * On real hardware, returning too fast leaves the USB driver with
+     * unsynced sectors; the clean exit to boot.elf loses the log. */
+    printf("[ps2] fs: syncing USB and pausing 3s before returning...\n");
+    fflush(stdout);
+    fflush(stderr);
+    {
+        int i;
+        for (i = 0; i < 3; i++) {
+            DelayThread(1000000); /* 1s x 3 = 3s */
         }
     }
 }
