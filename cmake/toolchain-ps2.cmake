@@ -43,11 +43,13 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
 endif()
 
-# Build type flags
-set(CMAKE_C_FLAGS_DEBUG "-Og -g")
-set(CMAKE_CXX_FLAGS_DEBUG "-Og -g")
-set(CMAKE_C_FLAGS_RELEASE "-O2 -fno-strict-aliasing -fomit-frame-pointer -ffast-math -mno-check-zero-division")
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -fno-strict-aliasing -fomit-frame-pointer -ffast-math -mno-check-zero-division")
+# Build type flags. These must be CACHE/FORCE: CMake pre-populates
+# CMAKE_*_FLAGS_RELEASE with its own defaults (-O3 -DNDEBUG), so a plain
+# set() here would silently be ignored on the first configure.
+set(CMAKE_C_FLAGS_DEBUG "-Og -g" CACHE STRING "C debug flags" FORCE)
+set(CMAKE_CXX_FLAGS_DEBUG "-Og -g" CACHE STRING "C++ debug flags" FORCE)
+set(CMAKE_C_FLAGS_RELEASE "-O2 -fno-strict-aliasing -fomit-frame-pointer -ffast-math -mno-check-zero-division" CACHE STRING "C release flags" FORCE)
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -fno-strict-aliasing -fomit-frame-pointer -ffast-math -mno-check-zero-division" CACHE STRING "C++ release flags" FORCE)
 
 set(CMAKE_C_FLAGS_INIT ${EE_CFLAGS})
 set(CMAKE_CXX_FLAGS_INIT ${EE_CFLAGS})

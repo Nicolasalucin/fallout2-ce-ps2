@@ -40,6 +40,10 @@
 #include "window_manager_private.h"
 #include "worldmap.h"
 
+#ifdef __PS2__
+#include "platform/ps2/ps2_perf.h"
+#endif
+
 namespace fallout {
 
 #define SCRIPT_LIST_EXTENT_SIZE 16
@@ -897,6 +901,11 @@ int scriptsHandleRequests()
         return 0;
     }
 
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_SCRIPTS_REQ);
+    ps2_perf_counter_add(PS2_PERF_COUNT_SCRIPT_REQUESTS, 1);
+#endif
+
     if ((gScriptsRequests & SCRIPT_REQUEST_COMBAT) != 0) {
         if (!_action_explode_running()) {
             // entering combat
@@ -1026,6 +1035,10 @@ int scriptsHandleRequests()
     }
 
     DeleteAllTempArrays();
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_SCRIPTS_REQ);
+#endif
 
     return 0;
 }
@@ -1258,7 +1271,7 @@ void _script_make_path(char* path)
 
 // exec_script_proc
 // 0x4A4810
-int scriptExecProc(int sid, int proc)
+static int scriptExecProcImpl(int sid, int proc)
 {
     if (!gScriptsEnabled) {
         return -1;
@@ -1340,6 +1353,22 @@ int scriptExecProc(int sid, int proc)
     script->source = nullptr;
 
     return 0;
+}
+
+int scriptExecProc(int sid, int proc)
+{
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_SCRIPT_EXEC);
+    ps2_perf_counter_add(PS2_PERF_COUNT_SCRIPT_EXECS, 1);
+#endif
+
+    int rc = scriptExecProcImpl(sid, proc);
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_SCRIPT_EXEC);
+#endif
+
+    return rc;
 }
 
 // Locate built-in procs for given script.
@@ -2674,6 +2703,10 @@ void scriptsExecMapUpdateProc()
 // 0x4A67EC
 void scriptsExecMapUpdateScripts(int proc)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_SCRIPTS_MAP);
+#endif
+
     // SFALL: Run global scripts.
     sfall_gl_scr_exec_map_update_scripts(proc);
 
@@ -2697,12 +2730,18 @@ void scriptsExecMapUpdateScripts(int proc)
     }
 
     if (sidListCapacity == 0) {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_stage_end(PS2_PERF_STAGE_SCRIPTS_MAP);
+#endif
         return;
     }
 
     int* sidList = (int*)internal_malloc(sizeof(*sidList) * sidListCapacity);
     if (sidList == nullptr) {
         debugPrint("\nError: scr_exec_map_update_scripts: Out of memory for sidList!");
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_stage_end(PS2_PERF_STAGE_SCRIPTS_MAP);
+#endif
         return;
     }
 
@@ -2739,6 +2778,10 @@ void scriptsExecMapUpdateScripts(int proc)
     internal_free(sidList);
 
     _scr_SpatialsEnabled = true;
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_SCRIPTS_MAP);
+#endif
 }
 
 // 0x4A69A0

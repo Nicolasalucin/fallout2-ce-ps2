@@ -22,6 +22,12 @@ uint32_t ps2_time_ms(void);
 /* Monotonic microseconds since boot (64-bit, no wrap). */
 uint64_t ps2_time_us(void);
 
+#ifdef PS2_DEV_SMOKE_TEST
+/* Raw kernel system timer ticks (EE bus clock, 147.456 MHz). Use this for
+ * profiling deltas: it avoids the per-call division of ps2_time_us/ms. */
+uint64_t ps2_time_ticks(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

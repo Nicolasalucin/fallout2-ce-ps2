@@ -4489,7 +4489,7 @@ static int attackDetermineToHit(Object* attacker, int tile, Object* defender, in
             combatDifficultyToHitModifier = 20;
             break;
         }
-#if defined(__PS2__)
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
         /* [PERF] smoke probe: the difficulty branch above is only read while
          * a live battle runs, so observing it proves the setting reaches
          * combat resolution. The applied modifier travels with the sample so
@@ -4572,7 +4572,7 @@ static void attackComputeDamage(Attack* attack, int ammoQuantity, int bonusDamag
             combatDifficultyDamageModifier = 125;
             break;
         }
-#if defined(__PS2__)
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
         /* [PERF] smoke probe: damage scaling branch, see ps2_perf.h. */
         ps2_perf_cbt_difficulty(PS2_PERF_CBT_DAMAGE, settings.preferences.combat_difficulty, combatDifficultyDamageModifier);
 #endif

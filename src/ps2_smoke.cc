@@ -1654,6 +1654,13 @@ static bool smoke_act_tour(void)
             }
         }
 
+        /* Close the per-map scope: stage averages, blitter/script/VFS counts
+         * and the cpu_active = frame - flip split for this entry. Flush the
+         * last partial frame first so its stages are included. */
+        ps2_perf_scope_flush();
+        ps2_perf_scope_print(mapName);
+        ps2_perf_scope_reset();
+
         ps2_mem_print_stats();
         SMOKE_LOG("tour: %s done (%s)", mapName, gMapHeader.name);
     }

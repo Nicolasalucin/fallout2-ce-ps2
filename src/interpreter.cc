@@ -19,6 +19,10 @@
 #include "sfall_global_scripts.h"
 #include "svga.h"
 
+#ifdef __PS2__
+#include "platform/ps2/ps2_perf.h"
+#endif
+
 namespace fallout {
 
 typedef struct ProgramListNode {
@@ -3132,6 +3136,10 @@ Program* runScript(char* name)
 // 0x46E1EC
 void _updatePrograms()
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_INTERP_UPDATE);
+#endif
+
     // CE: Implementation is different. Sfall inserts global scripts into
     // program list upon creation, so engine does not diffirentiate between
     // global and normal scripts. Global scripts in CE are not part of program
@@ -3155,6 +3163,10 @@ void _updatePrograms()
     }
     _doEvents();
     intLibUpdate();
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_INTERP_UPDATE);
+#endif
 }
 
 // 0x46E238

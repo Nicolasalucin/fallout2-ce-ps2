@@ -20,6 +20,10 @@
 #include "settings.h"
 #include "svga.h"
 
+#ifdef __PS2__
+#include "platform/ps2/ps2_perf.h"
+#endif
+
 namespace fallout {
 
 typedef struct RightsideUpTableEntry {
@@ -639,6 +643,10 @@ static void tileRefreshGame(Rect* rect, int elevation)
         return;
     }
 
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_TILE_REFRESH);
+#endif
+
     // CE: Clear dirty rect to prevent most of the visual artifacts near map
     // edges.
     bufferFill(gTileWindowBuffer + rectToUpdate.top * gTileWindowPitch + rectToUpdate.left,
@@ -652,6 +660,10 @@ static void tileRefreshGame(Rect* rect, int elevation)
     tileRenderRoofsInRect(&rectToUpdate, elevation);
     _obj_render_post_roof(&rectToUpdate, elevation);
     gTileWindowRefreshProc(&rectToUpdate);
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_TILE_REFRESH);
+#endif
 }
 
 // 0x4B1634
@@ -1224,6 +1236,10 @@ void tileRenderRoofsInRect(Rect* rect, int elevation)
         return;
     }
 
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_TILE_ROOF);
+#endif
+
     int temp;
     int minY;
     int minX;
@@ -1432,11 +1448,19 @@ static void tileRenderRoof(int fid, int x, int y, Rect* rect, int light)
     }
 
     artUnlock(tileFrmHandle);
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_TILE_ROOF);
+#endif
 }
 
 // 0x4B2944
 void tileRenderFloorsInRect(Rect* rect, int elevation)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_TILE_FLOOR);
+#endif
+
     int minY;
     int maxX;
     int maxY;
@@ -1482,6 +1506,10 @@ void tileRenderFloorsInRect(Rect* rect, int elevation)
         }
         baseSquareTile += gSquareGridWidth;
     }
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_TILE_FLOOR);
+#endif
 }
 
 // 0x4B2B10

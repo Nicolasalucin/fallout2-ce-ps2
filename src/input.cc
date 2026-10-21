@@ -170,9 +170,9 @@ int inputGetInput()
 #if defined(PS2_DEV_SMOKE_TEST)
     ps2_smoke_tick();
 #endif
-#if defined(__PS2__)
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
     /* [PERF] per-frame sampling for the smoke report. */
-    ps2_perf_frame_tick(ps2_time_ms());
+    ps2_perf_frame_tick(ps2_time_ticks());
 #endif
 
     _GNW95_process_message();

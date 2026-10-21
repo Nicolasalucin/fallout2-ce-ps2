@@ -5,6 +5,10 @@
 #include "color.h"
 #include "svga.h"
 
+#ifdef __PS2__
+#include "platform/ps2/ps2_perf.h"
+#endif
+
 namespace fallout {
 
 // 0x4D2FC0
@@ -323,6 +327,11 @@ void srcCopy(unsigned char* dest, int destPitch, unsigned char* src, int srcPitc
 // 0x4E0ED5
 void transSrcCopy(unsigned char* dest, int destPitch, unsigned char* src, int srcPitch, int width, int height)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_counter_add(PS2_PERF_COUNT_TRANS, 1);
+    ps2_perf_counter_add(PS2_PERF_COUNT_BLIT_PIXELS, (unsigned long long)width * height);
+#endif
+
     int destSkip = destPitch - width;
     int srcSkip = srcPitch - width;
 

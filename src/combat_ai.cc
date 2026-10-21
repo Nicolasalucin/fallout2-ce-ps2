@@ -2655,7 +2655,7 @@ static int _ai_called_shot(Object* attacker, Object* defender, int hitMode)
                     intelligenceRequired = 3;
                     break;
                 }
-#if defined(__PS2__)
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
                 /* [PERF] smoke probe: AI called-shot threshold driven by the
                  * combat difficulty setting. */
                 ps2_perf_cbt_difficulty(PS2_PERF_CBT_AI, settings.preferences.combat_difficulty, intelligenceRequired);

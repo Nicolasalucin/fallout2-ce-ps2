@@ -783,7 +783,9 @@ int mapLoadByName(char* fileName)
 
 #if defined(__PS2__)
     PS2_LOG("[ps2] map: load '%s' begin free=%d KB", fileName, ps2_mem_free_kb());
+#if defined(PS2_DEV_SMOKE_TEST)
     ps2_perf_map_load_begin();
+#endif
 #endif
 
     rc = -1;
@@ -820,7 +822,9 @@ int mapLoadByName(char* fileName)
     }
 
 #if defined(__PS2__)
+#if defined(PS2_DEV_SMOKE_TEST)
     ps2_perf_map_load_end(fileName);
+#endif
     PS2_LOG("[ps2] map: load '%s' rc=%d free=%d KB", fileName, rc, ps2_mem_free_kb());
 #endif
 

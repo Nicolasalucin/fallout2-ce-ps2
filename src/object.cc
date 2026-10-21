@@ -28,6 +28,10 @@
 #include "tile.h"
 #include "worldmap.h"
 
+#ifdef __PS2__
+#include "platform/ps2/ps2_perf.h"
+#endif
+
 namespace fallout {
 
 static int objectLoadAllInternal(File* stream);
@@ -769,6 +773,10 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
         return;
     }
 
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_OBJ_PRE_ROOF);
+#endif
+
     int ambientIntensity = lightGetAmbientIntensity();
     int minX = updatedRect.left - 320;
     int minY = updatedRect.top - 240;
@@ -856,6 +864,10 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
             objectListNode = objectListNode->next;
         }
     }
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_OBJ_PRE_ROOF);
+#endif
 }
 
 // 0x4897EC
@@ -869,6 +881,10 @@ void _obj_render_post_roof(Rect* rect, int elevation)
     if (rectIntersection(rect, &gObjectsWindowRect, &updatedRect) != 0) {
         return;
     }
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_OBJ_POST_ROOF);
+#endif
 
     for (int index = 0; index < _outlineCount; index++) {
         objectDrawOutline(_outlinedObjects[index], &updatedRect);
@@ -884,6 +900,10 @@ void _obj_render_post_roof(Rect* rect, int elevation)
         }
         objectListNode = objectListNode->next;
     }
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_OBJ_POST_ROOF);
+#endif
 }
 
 // 0x489A84
@@ -2731,6 +2751,11 @@ void objectListFree(Object** objectList)
 // 0x48BDD8
 void _translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, unsigned char* a9, unsigned char* a10)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_counter_add(PS2_PERF_COUNT_TRANS_LUCENT, 1);
+    ps2_perf_counter_add(PS2_PERF_COUNT_BLIT_PIXELS, (unsigned long long)srcWidth * srcHeight);
+#endif
+
     dest += destPitch * destY + destX;
     int srcStep = srcPitch - srcWidth;
     int destStep = destPitch - srcWidth;
@@ -2756,6 +2781,11 @@ void _translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeig
 // 0x48BEFC
 void _dark_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int intensity)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_counter_add(PS2_PERF_COUNT_DARK_TRANS, 1);
+    ps2_perf_counter_add(PS2_PERF_COUNT_BLIT_PIXELS, (unsigned long long)srcWidth * srcHeight);
+#endif
+
     unsigned char* sp = src;
     unsigned char* dp = dest + destPitch * destY + destX;
 
@@ -2786,6 +2816,11 @@ void _dark_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int
 // 0x48BF88
 void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int intensity, unsigned char* a10, unsigned char* a11)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_counter_add(PS2_PERF_COUNT_DARK_TRANS_LUCENT, 1);
+    ps2_perf_counter_add(PS2_PERF_COUNT_BLIT_PIXELS, (unsigned long long)srcWidth * srcHeight);
+#endif
+
     int srcStep = srcPitch - srcWidth;
     int destStep = destPitch - srcWidth;
     int intensityIndex = intensity / 512;
@@ -2814,6 +2849,11 @@ void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int sr
 // 0x48C03C
 void _intensity_mask_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destPitch, unsigned char* mask, int maskPitch, int intensity)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_counter_add(PS2_PERF_COUNT_INTENSITY_MASK, 1);
+    ps2_perf_counter_add(PS2_PERF_COUNT_BLIT_PIXELS, (unsigned long long)srcWidth * srcHeight);
+#endif
+
     int srcStep = srcPitch - srcWidth;
     int destStep = destPitch - srcWidth;
     int maskStep = maskPitch - srcWidth;

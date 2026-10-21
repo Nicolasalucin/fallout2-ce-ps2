@@ -13,6 +13,7 @@
 
 #ifdef __PS2__
 #include "ps2_fs.h"
+#include "platform/ps2/ps2_perf.h"
 #endif
 
 namespace fallout {
@@ -550,7 +551,15 @@ size_t dfileRead(void* ptr, size_t size, size_t count, DFile* stream)
     assert(ptr); // "ptr", "dfile.c", 499
     assert(stream); // "stream", dfile.c, 500
 
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_VFS_READ);
+    ps2_perf_counter_add(PS2_PERF_COUNT_DFILE_READS, 1);
+#endif
+
     if ((stream->flags & DFILE_EOF) != 0 || (stream->flags & DFILE_ERROR) != 0) {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_stage_end(PS2_PERF_STAGE_VFS_READ);
+#endif
         return 0;
     }
 
@@ -581,14 +590,28 @@ size_t dfileRead(void* ptr, size_t size, size_t count, DFile* stream)
     if (stream->entry->compressed == 1) {
         if (!dfileReadCompressed(stream, ptr, bytesToRead)) {
             stream->flags |= DFILE_ERROR;
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+            ps2_perf_stage_end(PS2_PERF_STAGE_VFS_READ);
+#endif
             return false;
         }
 
         bytesRead = bytesToRead;
     } else {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_stage_begin(PS2_PERF_STAGE_VFS_RAWIO);
+#endif
         bytesRead = fread(ptr, 1, bytesToRead, stream->stream) + extraBytesRead;
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_stage_end(PS2_PERF_STAGE_VFS_RAWIO);
+#endif
         stream->position += bytesRead;
     }
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_counter_add(PS2_PERF_COUNT_DFILE_BYTES, (unsigned long long)bytesRead);
+    ps2_perf_stage_end(PS2_PERF_STAGE_VFS_READ);
+#endif
 
     return bytesRead / size;
 }
@@ -916,6 +939,12 @@ static int dfileReadCharInternal(DFile* stream)
 // 0x4E6078
 static bool dfileReadCompressed(DFile* stream, void* ptr, size_t size)
 {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_begin(PS2_PERF_STAGE_VFS_INFLATE);
+    ps2_perf_counter_add(PS2_PERF_COUNT_INFLATE_CALLS, 1);
+    ps2_perf_counter_add(PS2_PERF_COUNT_INFLATE_BYTES, (unsigned long long)size);
+#endif
+
     if ((stream->flags & DFILE_HAS_COMPRESSED_UNGETC) != 0) {
         unsigned char* byteBuffer = (unsigned char*)ptr;
         *byteBuffer++ = stream->compressedUngotten & 0xFF;
@@ -927,6 +956,9 @@ static bool dfileReadCompressed(DFile* stream, void* ptr, size_t size)
         stream->position++;
 
         if (size == 0) {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+            ps2_perf_stage_end(PS2_PERF_STAGE_VFS_INFLATE);
+#endif
             return true;
         }
     }
@@ -944,7 +976,15 @@ static bool dfileReadCompressed(DFile* stream, void* ptr, size_t size)
             // No more unprocessed data, request next chunk.
             size_t bytesToRead = std::min(DFILE_DECOMPRESSION_BUFFER_SIZE, stream->entry->dataSize - stream->compressedBytesRead);
 
-            if (fread(stream->decompressionBuffer, bytesToRead, 1, stream->stream) != 1) {
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+            ps2_perf_stage_begin(PS2_PERF_STAGE_VFS_RAWIO);
+#endif
+            size_t readResult = fread(stream->decompressionBuffer, bytesToRead, 1, stream->stream);
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+            ps2_perf_stage_end(PS2_PERF_STAGE_VFS_RAWIO);
+#endif
+
+            if (readResult != 1) {
                 break;
             }
 
@@ -958,11 +998,17 @@ static bool dfileReadCompressed(DFile* stream, void* ptr, size_t size)
     if (stream->decompressionStream->avail_out != 0) {
         // There are some data still waiting, which means there was in error
         // during decompression loop above.
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_stage_end(PS2_PERF_STAGE_VFS_INFLATE);
+#endif
         return false;
     }
 
     stream->position += size;
 
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+    ps2_perf_stage_end(PS2_PERF_STAGE_VFS_INFLATE);
+#endif
     return true;
 }
 

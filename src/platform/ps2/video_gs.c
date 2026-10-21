@@ -22,6 +22,9 @@
 
 #include "ps2_video.h"
 #include "ps2_time.h"
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_perf.h"
+#endif
 #include "ps2_osk.h"
 #include "sdl/ps2_sdl_internal.h"
 
@@ -158,7 +161,13 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
          * for the GIF DMA to finish before returning, but make the contract
          * explicit here because the next step overwrites s_fb_rgba while the
          * DMAC may still be reading it. */
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_begin(PS2_PERF_STAGE_PRESENT_UPLOAD);
+#endif
         dmaKit_wait_fast();
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_UPLOAD);
+#endif
 
         /* Paletted -> CT32 on the EE (Option A): one LUT read per pixel.
          * s_palette is already in GS CT32 byte order (A B G R), so every
@@ -168,6 +177,9 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
          * Indices are 8-bit; loads are byte-wide, stores are 32-bit aligned.
          * `restrict` lets GCC schedule the LUT loads and the 32-bit stores
          * without conservative alias barriers. */
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_begin(PS2_PERF_STAGE_PRESENT_LUT);
+#endif
         u32* restrict dst = s_fb_rgba;
         const u32* restrict lut = s_palette;
         const u8* restrict src = indices;
@@ -186,11 +198,20 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
         for (; i < pixel_count; i++) {
             dst[i] = lut[src[i]];
         }
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_LUT);
+#endif
 
         /* F8: composite the on-screen keyboard over the freshly built
          * frame (engine buffers untouched; no-op while closed). */
         if (ps2_osk_is_open()) {
+#ifdef PS2_DEV_SMOKE_TEST
+            ps2_perf_stage_begin(PS2_PERF_STAGE_PRESENT_OSK);
+#endif
             ps2_osk_render(s_fb_rgba, PS2_SCR_W, PS2_SCR_H);
+#ifdef PS2_DEV_SMOKE_TEST
+            ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_OSK);
+#endif
         }
 
         s_texture.Mem = (u32*)s_fb_rgba;
@@ -200,21 +221,45 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
          * whole D-cache here would also write back mixer/file buffers for no
          * benefit (gsKit_texture_send does its own writeback as a safety net,
          * so this explicit call is the precise one that matters). */
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_begin(PS2_PERF_STAGE_PRESENT_UPLOAD);
+#endif
         SyncDCache((void*)s_fb_rgba, (void*)(s_fb_rgba + pixel_count));
         gsKit_texture_upload(s_gs, &s_texture);
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_UPLOAD);
+#endif
         t1 = ps2_time_ms();
 
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_begin(PS2_PERF_STAGE_PRESENT_DRAW);
+#endif
         gsKit_clear(s_gs, GS_SETREG_RGBAQ(0, 0, 0, 0, 0));
         gsKit_prim_sprite_texture_3d(s_gs, &s_texture,
             0.0f, 0.0f, 1, 0.0f, 0.0f,
             (float)PS2_OUT_W, (float)PS2_OUT_H, 1, (float)PS2_SCR_W, (float)PS2_SCR_H,
             GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0));
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_DRAW);
+#endif
         t2 = ps2_time_ms();
 
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_begin(PS2_PERF_STAGE_PRESENT_EXEC);
+#endif
         gsKit_queue_exec(s_gs);
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_EXEC);
+#endif
         t3 = ps2_time_ms();
 
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_begin(PS2_PERF_STAGE_PRESENT_FLIP);
+#endif
         gsKit_sync_flip(s_gs);
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_FLIP);
+#endif
         t4 = ps2_time_ms();
 
         s_phase_ms[0] += t1 - t0;

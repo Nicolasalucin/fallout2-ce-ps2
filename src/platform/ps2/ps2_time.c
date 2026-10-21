@@ -29,6 +29,13 @@ uint64_t ps2_time_us(void)
     return GetTimerSystemTime() / PS2_TIMER_TICKS_PER_US;
 }
 
+#ifdef PS2_DEV_SMOKE_TEST
+uint64_t ps2_time_ticks(void)
+{
+    return GetTimerSystemTime();
+}
+#endif
+
 uint32_t ps2_time_ms(void)
 {
     return (uint32_t)(GetTimerSystemTime() / PS2_TIMER_TICKS_PER_MS);
