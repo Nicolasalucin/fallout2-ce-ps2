@@ -635,6 +635,57 @@ static fs_dir_cache_slot_t* fs_dir_cache_fill(const char* dir)
         fs_dir_cache_invalidate();
     }
 
+    /* PCSX2's usbhdfsd HLE hangs on readdir for mass:/ and mass:/FALLOUT2/.
+     * Workaround: manually populate cache for known Fallout 2 media layout. */
+    if (strcmp(dir, "mass:/") == 0) {
+        /* Known entry on Fallout 2 media: FALLOUT2/ (directory). */
+        if (s_dir_arena_used + 1 + 9 > PS2_FS_DIR_CACHE_ARENA) {
+            return NULL;
+        }
+        start = s_dir_arena_used;
+        s_dir_arena[s_dir_arena_used++] = PS2_FS_KIND_DIR;
+        memcpy(&s_dir_arena[s_dir_arena_used], "FALLOUT2", 9);
+        s_dir_arena_used += 9;
+        count = 1;
+
+        slot = &s_dir_cache[s_dir_cache_next];
+        s_dir_cache_next = (s_dir_cache_next + 1) % PS2_FS_DIR_CACHE_SLOTS;
+        slot->valid = 0;
+        snprintf(slot->path, sizeof(slot->path), "%s", dir);
+        slot->count = count;
+        slot->offset = start;
+        slot->bytes = s_dir_arena_used - start;
+        slot->stamp = ps2_time_ms();
+        slot->valid = 1;
+        return slot;
+    }
+
+    if (strcmp(dir, "mass:/FALLOUT2/") == 0 || strcmp(dir, "mass:/FALLOUT2") == 0) {
+        /* Known entries in Fallout 2 data directory. */
+        if (s_dir_arena_used + 2 + 10 + 11 > PS2_FS_DIR_CACHE_ARENA) {
+            return NULL;
+        }
+        start = s_dir_arena_used;
+        s_dir_arena[s_dir_arena_used++] = PS2_FS_KIND_FILE;
+        memcpy(&s_dir_arena[s_dir_arena_used], "master.dat", 11);
+        s_dir_arena_used += 11;
+        s_dir_arena[s_dir_arena_used++] = PS2_FS_KIND_FILE;
+        memcpy(&s_dir_arena[s_dir_arena_used], "critter.dat", 12);
+        s_dir_arena_used += 12;
+        count = 2;
+
+        slot = &s_dir_cache[s_dir_cache_next];
+        s_dir_cache_next = (s_dir_cache_next + 1) % PS2_FS_DIR_CACHE_SLOTS;
+        slot->valid = 0;
+        snprintf(slot->path, sizeof(slot->path), "%s", dir);
+        slot->count = count;
+        slot->offset = start;
+        slot->bytes = s_dir_arena_used - start;
+        slot->stamp = ps2_time_ms();
+        slot->valid = 1;
+        return slot;
+    }
+
     d = fs_opendir(dir);
     if (d == NULL) {
         return NULL;

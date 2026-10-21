@@ -97,6 +97,18 @@ El build de produccion mantiene el log de diagnostico del port PS2:
 Cada linea se escribe, se vuelca a disco y se cierra al instante, por lo que
 ante un CUELLE o pantalla negra el archivo conserva la ultima actividad.
 
+IMPORTANTE - Colision con engine debug.mode=log:
+El engine Fallout 2 CE abre 'debug.log' con modo "wt" en la raiz de datos
+(cuando debug.mode=log en fallout2.cfg). Si usas USB y el engine tambien
+escribe ahi, ambas escrituras comparten el mismo archivo en mass:/FALLOUT2/.
+El port escribe lineas sueltas (flush inmediato); el engine hace fopen/fwrite/
+fclose por linea. Ambas coexisten pero pueden entremezclar lineas.
+
+Sincronizacion periodica (PS2_DEBUG_SYNC_MS = 5000):
+Cada 5 s (en SDL_RenderPresent) se fuerza un cierre/reapertura del log
+para vaciar la write-back cache de usbhdfsd y persistir el tamano en FAT.
+Esto asegura que el debug.log sea legible tras un cuelgue repentino.
+
 Si el juego crashea:
 1. Copia debug.log del USB/Memory Card.
 2. Indica modelo de PS2, metodo de carga (OPL/uLaunchELF/ESR),

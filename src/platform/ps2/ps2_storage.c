@@ -16,6 +16,7 @@
 #include "ps2_storage.h"
 #include "ps2_debug.h"
 
+#include <delaythread.h>
 #include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -181,7 +182,7 @@ int ps2_irx_exec(const char* name, const unsigned char* data, unsigned int size)
 
     if (ret >= 0) {
         printf("[ps2] storage: %s loaded (id %d, result %d, mod16=%u)\n", name, ret, result, mod16);
-        PS2_LOG("[ps2] irx: %s loaded (id %d, result %d, src_mod16=%u)", name, ret, result, mod16);
+        PS2_LOG("[ps2] irx: %s loaded (id %d, result %d, mod16=%u)", name, ret, result, mod16);
         return ret;
     }
 
@@ -190,7 +191,7 @@ int ps2_irx_exec(const char* name, const unsigned char* data, unsigned int size)
      * are non-fatal: the device probe below is the real test. */
     printf("[ps2] storage: %s not loaded (ret %d, result %d, mod16=%u) - continuing\n",
         name, ret, result, mod16);
-    PS2_LOG("[ps2] irx: %s not loaded (ret %d, result %d, src_mod16=%u)", name, ret, result, mod16);
+    PS2_LOG("[ps2] irx: %s not loaded (ret %d, result %d, mod16=%u)", name, ret, result, mod16);
     return ret;
 }
 
@@ -251,19 +252,40 @@ void ps2_storage_init(const char* argv0)
     sceSifInitRpc(0);
 
     storage_exec_irx("usbd.irx", g_ps2_usbd_irx, g_ps2_usbd_irx_size);
-    storage_exec_irx("usbhdfsd.irx", g_ps2_usbhdfsd_irx, g_ps2_usbhdfsd_irx_size);
+    DelayThread(500000); /* let the usbd thread start */
 
-    if (!storage_mass_present()) {
-        /* BDM block-device layer (also the base for MX4SIO below). */
-        storage_exec_irx("bdm.irx", g_ps2_bdm_irx, g_ps2_bdm_irx_size);
-        storage_exec_irx("usbmass_bd.irx", g_ps2_usbmass_bd_irx, g_ps2_usbmass_bd_irx_size);
-        storage_exec_irx("bdmfs_fatfs.irx", g_ps2_bdmfs_fatfs_irx, g_ps2_bdmfs_fatfs_irx_size);
+    storage_exec_irx("usbhdfsd.irx", g_ps2_usbhdfsd_irx, g_ps2_usbhdfsd_irx_size);
+    DelayThread(500000); /* let the usbhdfsd thread start */
+
+    /* Load memory card modules early so they initialize during the wait loop
+     * (replicates the old MX4SIO/BDM bring-up which implicitly did this). */
+    SifInitRpc(0);
+    SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    SifLoadModule("rom0:MCMAN", 0, NULL);
+    SifLoadModule("rom0:MCSERV", 0, NULL);
+
+    /* Wait for mass: to become ready (up to 20s). On real hardware this succeeds
+     * immediately; on PCSX2 the fs.c workarounds handle the readdir hang. */
+    {
+        int tries;
+        DIR* d;
+        for (tries = 0; tries < 40; tries++) {
+            d = opendir("mass:/");
+            if (d != NULL) {
+                closedir(d);
+                break;
+            }
+            DelayThread(500000);
+        }
     }
 
-    if (!storage_mass_present()) {
-        /* MX4SIO: SIO2-based memory card port adapter. */
-        storage_exec_irx("sio2man.irx", g_ps2_sio2man_irx, g_ps2_sio2man_irx_size);
-        storage_exec_irx("mx4sio_bd.irx", g_ps2_mx4sio_bd_irx, g_ps2_mx4sio_bd_irx_size);
+    /* Give the IOP time to initialize mc0: and other devices
+     * (the old 20s MX4SIO/BDM bring-up provided this implicitly). */
+    {
+        int i;
+        for (i = 0; i < 20; i++) {
+            DelayThread(500000); /* 10s total */
+        }
     }
 
     if (storage_mass_present()) {

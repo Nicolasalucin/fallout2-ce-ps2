@@ -10,6 +10,8 @@
  *                asset discovery seeded from argv[0]
  *   fs        -> device probing + case-insensitive path resolution
  *   save      -> memory card / host save root
+ *   logging   -> stdout/stderr redirected to mass:/FALLOUT2/debug.log
+ *                AFTER fs probing completes (avoids PCSX2 readdir hang)
  *
  * Audio (audsrv) is initialized lazily, when the engine opens the mixer.
  */
@@ -71,11 +73,21 @@ int ps2_boot(const char* argv0)
 
     ps2_input_init();
     ps2_storage_init(argv0);
+
+    /* mass: exists now (ps2_storage_init() loaded usbd/usbmass_bd and
+     * confirmed the device). Probe the data roots FIRST (ps2_fs_init does
+     * case-insensitive readdir on mass:/ which hangs in PCSX2's usbhdfsd HLE
+     * if the vfat driver was exercised by prior opens). Redirect stdout/stderr
+     * AFTER fs probing completes, so every plain printf from here on lands in
+     * mass:/FALLOUT2/debug.log. */
     ps2_fs_init();
     ps2_save_init();
 
-    /* mass: only exists after the storage drivers ran, so the first lines
-     * above were buffered and are replayed here. */
+    /* Now safe to redirect - the dangerous readdir on mass:/ is done. */
+    ps2_init_debug_log();
+
+    /* No-op once the redirect above took over; otherwise the first lines
+     * above were buffered and are replayed to the per-line destination. */
     ps2_debug_reprobe();
     PS2_LOG("[ps2] boot: debug log active='%s'", ps2_debug_path());
 
