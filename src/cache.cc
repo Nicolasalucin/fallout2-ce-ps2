@@ -1,6 +1,7 @@
 #include "cache.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +9,10 @@
 #include "debug.h"
 #include "memory.h"
 #include "sound.h"
+
+#ifdef __PS2__
+#include "platform/ps2/ps2_perf.h"
+#endif
 
 namespace fallout {
 
@@ -17,9 +22,25 @@ namespace fallout {
 // The number of cache entries added when cache capacity is reached.
 #define CACHE_ENTRIES_GROW_CAPACITY (50)
 
+// Direct-mapped key -> index hint for the sorted cache entry array. The art
+// cache is hit hundreds of times per frame; a binary search over ~700 entries
+// is by far the most expensive part of a cache lock. The hint is validated
+// against the live entry (bounds + key), so insertions, evictions and shifts
+// only cause a fallback to the binary search, never a wrong lookup.
+#define CACHE_LOOKUP_SIZE (1024)
+
+typedef struct CacheLookupSlot {
+    Cache* cache;
+    int key;
+    int index;
+} CacheLookupSlot;
+
+static CacheLookupSlot s_cacheLookup[CACHE_LOOKUP_SIZE];
+
 static bool cacheFetchEntryForKey(Cache* cache, int key, int* indexPtr);
 static bool cacheInsertEntryAtIndex(Cache* cache, CacheEntry* cacheEntry, int index);
 static int cacheFindIndexForKey(Cache* cache, int key, int* indexPtr);
+static unsigned int cacheLookupHash(Cache* cache, int key);
 static bool cacheEntryInit(CacheEntry* cacheEntry);
 static bool cacheEntryFree(Cache* cache, CacheEntry* cacheEntry);
 static bool cacheClean(Cache* cache);
@@ -103,10 +124,16 @@ bool cacheLock(Cache* cache, int key, void** data, CacheEntry** cacheEntryPtr)
     int rc = cacheFindIndexForKey(cache, key, &index);
     if (rc == 2) {
         // Use existing cache entry.
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_counter_add(PS2_PERF_COUNT_CACHE_HITS, 1);
+#endif
         CacheEntry* cacheEntry = cache->entries[index];
         cacheEntry->hits++;
     } else if (rc == 3) {
         // New cache entry is required.
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+        ps2_perf_counter_add(PS2_PERF_COUNT_CACHE_MISSES, 1);
+#endif
         if (cache->entriesLength >= INT_MAX) {
             return false;
         }
@@ -124,6 +151,12 @@ bool cacheLock(Cache* cache, int key, void** data, CacheEntry** cacheEntryPtr)
     }
 
     CacheEntry* cacheEntry = cache->entries[index];
+
+    CacheLookupSlot* slot = &s_cacheLookup[cacheLookupHash(cache, key)];
+    slot->cache = cache;
+    slot->key = key;
+    slot->index = index;
+
     if (cacheEntry->referenceCount == 0) {
         if (!heapLock(&(cache->heap), cacheEntry->heapHandleIndex, &(cacheEntry->data))) {
             return false;
@@ -327,6 +360,13 @@ static bool cacheInsertEntryAtIndex(Cache* cache, CacheEntry* cacheEntry, int in
     return true;
 }
 
+static unsigned int cacheLookupHash(Cache* cache, int key)
+{
+    unsigned int hash = (unsigned int)key * 2654435761u;
+    hash ^= (unsigned int)(uintptr_t)cache >> 4;
+    return hash & (CACHE_LOOKUP_SIZE - 1);
+}
+
 // Finds index for given key.
 //
 // Returns 2 if entry already exists in cache, or 3 if entry does not exist. In
@@ -335,6 +375,15 @@ static bool cacheInsertEntryAtIndex(Cache* cache, CacheEntry* cacheEntry, int in
 // 0x420654
 static int cacheFindIndexForKey(Cache* cache, int key, int* indexPtr)
 {
+    CacheLookupSlot* slot = &s_cacheLookup[cacheLookupHash(cache, key)];
+    if (slot->cache == cache && slot->key == key) {
+        int cachedIndex = slot->index;
+        if (cachedIndex >= 0 && cachedIndex < cache->entriesLength && cache->entries[cachedIndex]->key == key) {
+            *indexPtr = cachedIndex;
+            return 2;
+        }
+    }
+
     int length = cache->entriesLength;
     if (length == 0) {
         *indexPtr = 0;
@@ -352,6 +401,9 @@ static int cacheFindIndexForKey(Cache* cache, int key, int* indexPtr)
         cmp = key - cache->entries[mid]->key;
         if (cmp == 0) {
             *indexPtr = mid;
+            slot->cache = cache;
+            slot->key = key;
+            slot->index = mid;
             return 2;
         }
 
@@ -538,6 +590,10 @@ static bool cacheSweep(Cache* cache)
 
                 // NOTE: Uninline.
                 cacheEntryFree(cache, cacheEntry);
+
+#if defined(__PS2__) && defined(PS2_DEV_SMOKE_TEST)
+                ps2_perf_counter_add(PS2_PERF_COUNT_CACHE_EVICTIONS, 1);
+#endif
 
                 // Move entries up.
                 memmove(&(cache->entries[index]), &(cache->entries[index + 1]), sizeof(*cache->entries) * ((cache->entriesLength - index) - 1));
