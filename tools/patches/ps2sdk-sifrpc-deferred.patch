@@ -8,11 +8,12 @@
  
  #define RPC_PACKET_SIZE 64
  
-@@ -288,11 +289,167 @@
+@@ -288,15 +289,247 @@
  
  
  /* Command 0x80000008 */
 +extern SifRpcClientData_t _fio_cd;
++extern void _fio_intr(void *);
 +
 +static int _rpc_client_ptr_ok(const void *ptr)
 +{
@@ -54,6 +55,68 @@
 +#define RPC_INVALID_DUMP_WORDS 16
 +
 +static void _rpc_dump_invalid_completion(SifRpcRendPkt_t *request);
++
++/* Find the packet allocated for a call by its RPC id. This lets a malformed
++ * completion release the caller even when cd->hdr.pkt_addr was already
++ * cleared (or was never visible) in the completion handler. */
++static void *_rpc_find_allocated_packet(int rpc_id)
++{
++    SifRpcPktHeader_t *packet;
++    int i;
++
++    if (rpc_id == 0 || _sif_rpc_data.pkt_table == NULL || _sif_rpc_data.pkt_table_len <= 0)
++        return NULL;
++
++    packet = (SifRpcPktHeader_t *)_sif_rpc_data.pkt_table;
++    for (i = 0; i < _sif_rpc_data.pkt_table_len; i++) {
++        if ((packet->rec_id & PACKET_F_ALLOC) && packet->rpc_id == rpc_id)
++            return packet;
++        packet = (SifRpcPktHeader_t *)((u8 *)packet + RPC_PACKET_SIZE);
++    }
++
++    return NULL;
++}
++
++/* A malformed completion is the only notification the waiting call will get.
++ * Dropping it prevents the TLB miss but leaves the caller in WaitSema()
++ * forever, which is fatal for a blocking request. The known fileio end
++ * function is the only callback executed here; other clients are completed
++ * by signalling their semaphore and releasing the packet without ever
++ * jumping through a potentially corrupt function pointer. The recorded
++ * snapshot is printed later from thread context by
++ * sceSifRpcDumpInvalidCompletion(). */
++static void _rpc_recover_invalid_completion(SifRpcRendPkt_t *request, SifRpcClientData_t *cd)
++{
++    int cd_is_fio = (cd == &_fio_cd
++        || (void *)cd->end_function == (void *)_fio_intr);
++    int fio_fallback = (!cd_is_fio
++        && !_rpc_packet_ptr_ok(_fio_cd.hdr.pkt_addr)
++        && _fio_cd.hdr.sema_id >= 0);
++    int is_fio = cd_is_fio || fio_fallback;
++    SifRpcClientData_t *target = cd_is_fio ? cd : (fio_fallback ? &_fio_cd : cd);
++    void *packet;
++
++    if (target == NULL)
++        return;
++
++    packet = _rpc_find_allocated_packet(target->hdr.rpc_id);
++
++    if (request->cid == SIF_CMD_RPC_CALL) {
++        if (is_fio)
++            _fio_intr(target->end_param);
++    } else if (request->cid == SIF_CMD_RPC_BIND) {
++        target->server = request->sd;
++        target->buf    = request->buf;
++        target->cbuf   = request->cbuf;
++    }
++
++    if (target->hdr.sema_id >= 0 && target->hdr.sema_id < 256)
++        iSignalSema(target->hdr.sema_id);
++
++    if (packet != NULL)
++        rpc_packet_free(packet);
++    target->hdr.pkt_addr = NULL;
++}
 +
 +static volatile u32 _rpc_invalid_dump_count;
 +static u32 _rpc_invalid_dump_words[RPC_INVALID_DUMP_WORDS];
@@ -154,7 +217,7 @@
      SifRpcClientData_t *cd = request->cd;
  
      (void)data;
-+
+ 
 +    /* A malformed completion (typically from an emulated or wedged IOP
 +     * server) used to dereference cd directly, turning a bad packet into an
 +     * EE TLB miss inside the SIF interrupt handler. Keep the diagnostic and
@@ -168,11 +231,30 @@
 +    /* The completion refers to the packet allocated by the matching
 +     * sceSifCallRpc/sceSifBindRpc/sceSifGetOtherData call. A stale or reused
 +     * client can leave a garbage pkt_addr here; freeing it would fault inside
-+     * rpc_packet_free() (observed as a TLB miss at address 0x10). */
++     * rpc_packet_free() (observed as a TLB miss at address 0x10). Record the
++     * snapshot, then complete the waiting call so it cannot sleep forever. */
 +    if (!_rpc_packet_ptr_ok(cd->hdr.pkt_addr)) {
 +        _rpc_record_invalid_completion(request);
++        _rpc_recover_invalid_completion(request, cd);
 +        return;
 +    }
- 
++
      if (request->cid == SIF_CMD_RPC_CALL) {
-         if (cd->end_function)
+-        if (cd->end_function)
+-            cd->end_function(cd->end_param);
++        if (cd == &_fio_cd || (void *)cd->end_function == (void *)_fio_intr) {
++            /* Fileio is the only blocking SIF client in this port. Its end
++             * function is a fixed kernel symbol; pass end_param through so
++             * the canonical fileio driver sees its context in $a0. */
++            _fio_intr(cd->end_param);
++        } else if (cd->end_function != NULL) {
++            /* Never jump through an arbitrary client callback from the SIF
++             * interrupt handler. A stale/corrupt pointer is typically
++             * 0xffffffff and used to fault with PC=0xffffffff. The semaphore
++             * is still signalled below so the caller cannot deadlock. */
++            if (!_rpc_client_ptr_ok((void *)cd->end_function))
++                _rpc_record_invalid_completion(request);
++        }
+     } else if (request->cid == SIF_CMD_RPC_BIND) {
+         cd->server  = request->sd;
+         cd->buf    = request->buf;
