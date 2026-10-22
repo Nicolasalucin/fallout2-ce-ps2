@@ -2,8 +2,8 @@ Fallout 2: A Post Nuclear Role Playing Game
 PS2 Port - Classic Edition
 
 Build: Classic Edition (fallout2-ce-ps2)
-Version: 1.0.1 STABLE (release v1.0.1-ps2)
-Platform: PlayStation 2 (NTSC)
+Version: 1.0.2 STABLE (release v1.0.2-ps2)
+Platform: PlayStation 2 (PAL/NTSC, deteccion automatica)
 Media: DVD-R / USB (mass:) / MX4SIO / HDD (PFS)
 
 ================================================================================
@@ -22,6 +22,39 @@ DVD-R:
 HDD (PFS):
 1. Copia la carpeta 'FALLOUT2' a tu particion PFS (ej. pfs:/FALLOUT2/).
 2. Lanza desde OPL / HDLoader.
+
+LAYOUT ESPERADO EN USB (FAT32 con MBR):
+mass:/FALLOUT2/
+  FALLOUT2.ELF       (este ejecutable)
+  fallout2.cfg       (configuracion, se crea automaticamente)
+  master.dat         (obligatorio, minusculas o mayusculas)
+  critter.dat        (obligatorio, minusculas o mayusculas)
+  data/              (opcional: mods, arte suelto, parches)
+  patch000.dat       (opcional: parche oficial)
+  PS2VIDEO.CFG       (opcional: forzar 'mode=pal' o 'mode=ntsc')
+  saves/             (se crea solo al guardar)
+  caps/              (capturas de video opcionales)
+
+El port busca los datos en todos los mass disponibles
+(mass:/, mass0:/, mass1:/, mass2:/, mass3:/), en mc0:/, cdrom0:/ y
+hdd0:/FALLOUT2/, tanto en la raiz del dispositivo como dentro de una
+carpeta FALLOUT2/. El VFS es case-insensitive: los archivos pueden estar
+en minusculas, mayusculas o mixtas (el media oficial usa minusculas).
+
+================================================================================
+VIDEO / REGION
+================================================================================
+
+La region se detecta automaticamente desde la ROM de arranque:
+Europa/PAL -> 640x448 a 50 Hz, resto -> 640x448 a 60 Hz.
+
+Para forzarla, crea mass:/FALLOUT2/PS2VIDEO.CFG con una unica linea:
+
+  mode=pal
+  mode=ntsc
+
+Si no estas seguro, no crees el archivo. PS2VIDEO.CFG tambien se acepta
+en mc0:/FALLOUT2/ y mass0:/FALLOUT2/.
 
 ================================================================================
 CONTROLES / CONTROLS
@@ -42,11 +75,12 @@ Start                   : Menu pausa / Opciones
 AHORRO / SAVES
 ================================================================================
 
-- Los saves se guardan en: mass:/FALLOUT2/  (USB)
-  o mc0:/FALLOUT2/       (Memory Card)
-  o hdd0:/FALLOUT2/      (HDD)
+- Los saves se guardan en: mass:/FALLOUT2/saves/  (USB)
+  o mc0:/FALLOUT2_S01..S10/   (Memory Card)
+  o hdd0:/FALLOUT2/saves/     (HDD)
 
-- Cada partida crea su carpeta: SLOT_01/, SLOT_02/, etc.
+- En USB: cada partida crea su carpeta: SLOT_01/, SLOT_02/, etc.
+- En Memory Card: ranuras FALLOUT2_S01..FALLOUT2_S10
 - Incluye: .SAV (mapa), AUTOMAP.DB, AUTOMAP.TMP
 - worldmap.dat se guarda en la raiz de FALLOUT2/
 
@@ -54,7 +88,7 @@ AHORRO / SAVES
 RENDIMIENTO / PERFORMANCE
 ================================================================================
 
-- Objetivo: 60 FPS (NTSC) en menus e interiores
+- Objetivo: 60 FPS (NTSC) / 50 FPS (PAL) en menus e interiores
 - Carga de mapa: < 2.5s (USB) / < 5s (DVD)
 - Abrir UI (Pip-Boy, Inventario): < 150ms
 - Emulador PCSX2: Usa modo "Strict" (sin speedhacks) para test real
@@ -93,10 +127,15 @@ El build de produccion mantiene el log de diagnostico del port PS2:
 
   mass:/FALLOUT2/debug.log   (USB / MX4SIO, destino normal)
   mass:/debug.log            (fallback si el juego esta en raiz del pendrive)
+  mass0:/FALLOUT2/debug.log  (fallback mass0:)
+  mass0:/debug.log           (fallback mass0: raiz)
   mc0:/FALLOUT2/debug.log    (Memory Card, fallback automatico)
 
 Cada linea se escribe, se vuelca a disco y se cierra al instante, por lo que
 ante un CUELLE o pantalla negra el archivo conserva la ultima actividad.
+
+Tope de tamano: 4 MB. Si se supera, la redireccion se desactiva y se vuelve
+al logger por linea (consola), para no llenar el pendrive.
 
 IMPORTANTE - Colision con engine debug.mode=log:
 El engine Fallout 2 CE abre 'debug.log' con modo "wt" en la raiz de datos
@@ -113,12 +152,22 @@ Esto asegura que el debug.log sea legible tras un cuelgue repentino.
 --- ARRANQUE BLINDADO EN PS2 SLIM (SCPH-700xx) ---
 En hardware real, los drivers usbd.irx + usbhdfsd.irx tardan 1.5-4s en
 negociar el pendrive USB 1.1 y montar mass:. Si el juego intenta leer
-assets antes, hace exit() limpio a boot.elf (pantalla negra sin debug.log).
+assets antes, hacia exit() limpio a boot.elf (pantalla negra sin debug.log).
 Este build incluye:
-  * Sondeo activo de mass:/ con timeout 4.5s (15 reintentos x 300ms)
-  * Redireccion de debug.log SOLO tras confirmar mass: montado
-  * Log preventivo + flush + pausa 3s antes de salir si faltan assets
-  * setvbuf(stdout/stderr, _IONBF) para escritura inmediata
+
+  * Sondeo activo de mass:/mass0:/mass1:/mass2:/mass3: SIEMPRE, incluso si
+    el loader ya monto mass: (6s, 20 intentos x 300ms), seguido de un
+    fallback BDM/MX4SIO y otra espera de 6s.
+  * Deteccion de dispositivo por stat()/open() en lugar de readdir(), para
+    no disparar el HLE de usbhdfsd en PCSX2.
+  * Redireccion de debug.log SOLO despues de confirmar el dispositivo.
+  * Pila principal de 1 MB (-Wl,--defsym,_stack_size=0x100000) y reporte de
+    high-water mark con canario al arrancar.
+  * Vectores de excepcion R5900 propios: una excepcion muestra una pantalla
+    fatal en la TV y vuelve al loader en lugar de colgarse en negro.
+  * Watchdog de video de 15s: si el GS no presenta el primer frame, muestra
+    un error claro (cable/region) en vez de quedarse en negro.
+  * Tope de 4 MB para debug.log.
 
 Si el juego crashea:
 1. Copia debug.log del USB/Memory Card.
@@ -147,6 +196,9 @@ PS2 Port: Nicolas Salucin (nicolasalucin)
   - v1.0: telemetria de crash montada sobre mass:/ y mc0:/ (debug.log)
   - v1.0.1: arranque blindado PS2 Slim (sondeo mass:/ 4.5s, debug.log seguro,
     flush+pause 3s ante assets faltantes, _IONBF en stdout/stderr)
+  - v1.0.2: VFS sin listados sinteticos, sondeo USB siempre activo,
+    pila 1 MB, excepciones R5900 con pantalla fatal, guard SIF RPC completo
+    (_fio_intr + _fio_read_intr), watchdog GS, log cap 4 MB
 
 AI-Assisted Development:
   - Arquitectura bajo nivel (Gemini / DeepSeek / Claude via OpenCode)
