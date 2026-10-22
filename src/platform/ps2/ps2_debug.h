@@ -97,6 +97,11 @@ const char* ps2_debug_path(void);
 
 #define PS2_LOG(...) ps2_debug_printf(__VA_ARGS__)
 
+/* Crash path handoff: flushes stdio and stops PS2_LOG() from touching the
+ * filesystem once the exception handler owns the console. */
+void ps2_debug_enter_crash_mode(void);
+void ps2_debug_flush_all(void);
+
 /* PS2_LOGV() lives in ps2_log.h: a single verbosity gate shared by every
  * PS2 translation unit (runtime toggle in debug builds, compiled out in
  * Release). Keep this header free of a second definition so files that

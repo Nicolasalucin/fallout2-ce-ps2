@@ -28,11 +28,19 @@
 
 #define PS2_DEBUG_PATH_MAX 128
 
+/* Maximum size of the debug log file on USB (4 MB). After this, the redirect
+ * is disabled and we fall back to the per-line logger so the stick doesn't
+ * fill up. */
+#define PS2_DEBUG_LOG_MAX_SIZE (4 * 1024 * 1024)
+
 /* Lines emitted before the USB stack is up (ps2_debug_init() runs first in
  * ps2_boot()) are kept here and replayed once a destination opens. */
 #define PS2_DEBUG_EARLY_SIZE 8192
 static char s_early[PS2_DEBUG_EARLY_SIZE];
 static int s_early_len;
+
+/* Crash mode flag: after an exception, PS2_LOG() stops touching files. */
+static int s_crash_mode = 0;
 
 static char s_path[PS2_DEBUG_PATH_MAX];
 static int s_probed;
@@ -46,9 +54,27 @@ static int s_redirected;
 /* Last ps2_debug_sync() (throttled by PS2_DEBUG_SYNC_MS). */
 static uint32_t s_last_sync_ms;
 
+/* Approximate number of bytes written to the redirected log (seeded with the
+ * existing file size once). Used to enforce PS2_DEBUG_LOG_MAX_SIZE without a
+ * stat() syscall on every line. */
+static unsigned int s_log_bytes;
+
+/* Sticky 4 MB cap flag: once set, no destination is probed or reopened for
+ * the rest of the session, so a full USB stick cannot be filled by the
+ * per-line logger re-selecting the same file. Console mirror stays active. */
+static int s_log_capped;
+
+/* Console descriptors saved before stdout/stderr are dup2()'d onto the log
+ * file. If the redirect is disabled (USB pulled or 4 MB cap), restoring them
+ * lets plain printf() fall back to the TTY instead of a closed/full file. */
+static int s_console_stdout = -1;
+static int s_console_stderr = -1;
+
 static const char* const s_candidates[] = {
     "mass:/FALLOUT2/debug.log",
     "mass:/debug.log",
+    "mass0:/FALLOUT2/debug.log",
+    "mass0:/debug.log",
     "mc0:/FALLOUT2/debug.log",
 };
 static const int s_candidate_count = (int)(sizeof(s_candidates) / sizeof(s_candidates[0]));
@@ -92,6 +118,11 @@ static void debug_prepare_mc0(void)
 static int debug_probe(void)
 {
     int i;
+    int over_cap = 0;
+
+    if (s_log_capped) {
+        return 0;
+    }
 
     if (!s_rpc_ready) {
         sceSifInitRpc(0);
@@ -101,15 +132,32 @@ static int debug_probe(void)
     s_path[0] = '\0';
 
     for (i = 0; i < s_candidate_count; i++) {
-        if (i == 1) {
+        struct stat st;
+
+        if (strncmp(s_candidates[i], "mc0:", 4) == 0) {
             debug_prepare_mc0();
         }
 
-        if (debug_file_writable(s_candidates[i])) {
-            strncpy(s_path, s_candidates[i], sizeof(s_path) - 1);
-            s_path[sizeof(s_path) - 1] = '\0';
-            return 1;
+        if (!debug_file_writable(s_candidates[i])) {
+            continue;
         }
+
+        /* Never re-select a log that already reached the cap: otherwise the
+         * per-line fallback would just keep appending to the same file. */
+        if (stat(s_candidates[i], &st) == 0 && st.st_size > PS2_DEBUG_LOG_MAX_SIZE) {
+            over_cap = 1;
+            continue;
+        }
+
+        strncpy(s_path, s_candidates[i], sizeof(s_path) - 1);
+        s_path[sizeof(s_path) - 1] = '\0';
+        s_log_bytes = (stat(s_candidates[i], &st) == 0)
+            ? (unsigned int)st.st_size : 0;
+        return 1;
+    }
+
+    if (over_cap) {
+        s_log_capped = 1;
     }
 
     return 0;
@@ -118,9 +166,28 @@ static int debug_probe(void)
 static int debug_write_line(uint32_t ms, const char* msg)
 {
     FILE* f;
+    unsigned int line_len;
 
-    if (s_path[0] == '\0') {
+    if (s_path[0] == '\0' || s_log_capped) {
         return 0;
+    }
+
+    line_len = (unsigned int)strlen(msg) + 32u;
+    if (s_log_bytes + line_len > PS2_DEBUG_LOG_MAX_SIZE) {
+        struct stat st;
+        unsigned int size = s_log_bytes;
+
+        if (stat(s_path, &st) == 0) {
+            size = (unsigned int)st.st_size;
+        }
+
+        if (size > PS2_DEBUG_LOG_MAX_SIZE) {
+            s_log_capped = 1;
+            s_path[0] = '\0';
+            return 0;
+        }
+
+        s_log_bytes = size;
     }
 
     f = fopen(s_path, "a");
@@ -131,15 +198,35 @@ static int debug_write_line(uint32_t ms, const char* msg)
     fprintf(f, "[ps2dbg] %8u ms | %s\n", (unsigned int)ms, msg);
     fflush(f);
     fclose(f);
+    s_log_bytes += line_len;
     return 1;
 }
 
 static void debug_flush_early(void)
 {
     FILE* f;
+    unsigned int len = (unsigned int)s_early_len;
 
-    if (s_early_len == 0 || s_path[0] == '\0') {
+    if (len == 0 || s_path[0] == '\0' || s_log_capped) {
         return;
+    }
+
+    if (s_log_bytes + len > PS2_DEBUG_LOG_MAX_SIZE) {
+        struct stat st;
+        unsigned int size = s_log_bytes;
+
+        if (stat(s_path, &st) == 0) {
+            size = (unsigned int)st.st_size;
+        }
+
+        if (size + len > PS2_DEBUG_LOG_MAX_SIZE) {
+            s_log_capped = 1;
+            s_path[0] = '\0';
+            s_early_len = 0;
+            return;
+        }
+
+        s_log_bytes = size;
     }
 
     f = fopen(s_path, "a");
@@ -147,9 +234,10 @@ static void debug_flush_early(void)
         return;
     }
 
-    fwrite(s_early, 1, (size_t)s_early_len, f);
+    fwrite(s_early, 1, (size_t)len, f);
     fflush(f);
     fclose(f);
+    s_log_bytes += len;
     s_early_len = 0;
 }
 
@@ -186,7 +274,7 @@ void ps2_debug_reprobe(void)
 
     /* ps2_init_debug_log() already owns stdout/stderr and s_path; probing
      * again would only race the open log file. */
-    if (s_redirected) {
+    if (s_redirected || s_log_capped) {
         return;
     }
 
@@ -201,6 +289,33 @@ void ps2_debug_reprobe(void)
 
     if (strcmp(previous, s_path) != 0) {
         ps2_debug_printf("[ps2] debug: log destination -> %s", s_path);
+    }
+}
+
+static void debug_save_console(void)
+{
+    if (s_console_stdout < 0) {
+        s_console_stdout = dup(STDOUT_FILENO);
+    }
+    if (s_console_stderr < 0) {
+        s_console_stderr = dup(STDERR_FILENO);
+    }
+}
+
+static void debug_restore_console(void)
+{
+    fflush(stdout);
+    fflush(stderr);
+
+    if (s_console_stdout >= 0) {
+        dup2(s_console_stdout, STDOUT_FILENO);
+        close(s_console_stdout);
+        s_console_stdout = -1;
+    }
+    if (s_console_stderr >= 0) {
+        dup2(s_console_stderr, STDERR_FILENO);
+        close(s_console_stderr);
+        s_console_stderr = -1;
     }
 }
 
@@ -246,6 +361,10 @@ static int debug_redirect_to(const char* path)
     fflush(stdout);
     fflush(stderr);
 
+    /* Keep a handle to the real console so the redirect can be undone when
+     * the medium disappears or the log reaches its size cap. */
+    debug_save_console();
+
     return debug_redirect_open(path);
 }
 
@@ -267,8 +386,11 @@ int ps2_debug_sync(void)
 
     if (!debug_redirect_open(s_path)) {
         /* Medium pulled or card removed while writing: fall back to the
-         * per-line logger so the next PS2_LOG() can re-probe. */
+         * per-line logger so the next PS2_LOG() can re-probe. Restore the
+         * saved console handles so plain printf() never targets a closed
+         * descriptor. */
         s_redirected = 0;
+        debug_restore_console();
         return 0;
     }
 
@@ -297,12 +419,15 @@ void ps2_init_debug_log(void)
     static const char* const candidates[] = {
         "mass:/FALLOUT2/debug.log",
         "mass:/debug.log",
+        "mass0:/FALLOUT2/debug.log",
+        "mass0:/debug.log",
     };
     int candidate_count = (int)(sizeof(candidates) / sizeof(candidates[0]));
     int last_errno = 0;
+    int capped = 0;
     int i;
 
-    if (s_redirected) {
+    if (s_redirected || s_log_capped) {
         return;
     }
 
@@ -315,6 +440,16 @@ void ps2_init_debug_log(void)
 #endif
 
     for (i = 0; i < candidate_count; i++) {
+        struct stat st;
+
+        /* Skip logs that already reached the 4 MB cap; write to the next
+         * destination instead of growing a full stick. */
+        if (stat(candidates[i], &st) == 0 && st.st_size > PS2_DEBUG_LOG_MAX_SIZE) {
+            capped = 1;
+            last_errno = EFBIG;
+            continue;
+        }
+
         if (!debug_redirect_to(candidates[i])) {
             last_errno = errno;
             continue;
@@ -324,6 +459,18 @@ void ps2_init_debug_log(void)
         strncpy(s_path, candidates[i], sizeof(s_path) - 1);
         s_path[sizeof(s_path) - 1] = '\0';
         s_last_sync_ms = ps2_time_ms();
+
+        {
+            FILE* f = fopen(s_path, "a");
+
+            if (f != NULL) {
+                fseek(f, 0, SEEK_END);
+                s_log_bytes = (unsigned int)ftell(f);
+                fclose(f);
+            } else {
+                s_log_bytes = 0;
+            }
+        }
 
         /* Boot lines buffered while mass: was missing (no mc0 either) are
          * replayed into the just-opened file before anything else. */
@@ -340,6 +487,13 @@ void ps2_init_debug_log(void)
 
     /* No mass: destination (hostfs run, memory-card-only boot or USB not
      * responding): keep the console mirror and the per-line logger. */
+    if (capped) {
+        s_log_capped = 1;
+        printf("[init] Hardware log redirect: 4 MB cap reached, console-only\n");
+        fflush(stdout);
+        return;
+    }
+
     printf("[init] Hardware log redirect: FAILED (errno=%d), keeping default TTY\n", last_errno);
     fflush(stdout);
 }
@@ -365,12 +519,47 @@ void ps2_debug_printf(const char* fmt, ...)
 
     ms = ps2_time_ms();
 
+    if (s_crash_mode) {
+        /* After an exception, don't touch files - just mirror to console. */
+        printf("[ps2dbg] %8u ms | %s\n", (unsigned int)ms, msg);
+        fflush(stdout);
+        return;
+    }
+
     if (s_redirected) {
         /* stdout/stderr are the mass: log now and are unbuffered. One
          * writer only: reopening the file per line here would race the IOP
          * FAT driver's file position and could overwrite earlier lines. */
         printf("[ps2dbg] %8u ms | %s\n", (unsigned int)ms, msg);
         fflush(stdout);
+
+        /* Check the approximate log size cap (4 MB). The actual file size is
+         * only queried when the counter crosses the threshold, so the normal
+         * path costs no extra I/O. */
+        s_log_bytes += (unsigned int)strlen(msg) + 32u;
+        if (s_log_bytes > PS2_DEBUG_LOG_MAX_SIZE) {
+            struct stat st;
+            unsigned int size = s_log_bytes;
+
+            if (stat(s_path, &st) == 0) {
+                size = (unsigned int)st.st_size;
+            }
+
+            if (size > PS2_DEBUG_LOG_MAX_SIZE) {
+                s_redirected = 0;
+                s_log_capped = 1;
+                s_path[0] = '\0';
+                debug_restore_console();
+                printf("[ps2] debug: log size cap reached (%u bytes), console-only\n",
+                       size);
+                fflush(stdout);
+                return;
+            }
+
+            /* Counter drifted (file was rotated/truncated): resync it. */
+            s_log_bytes = size;
+        }
+
         ps2_debug_tick();
         return;
     }
@@ -390,6 +579,11 @@ void ps2_debug_printf(const char* fmt, ...)
     }
 
     if (!debug_write_line(ms, msg)) {
+        /* Log cap reached: console mirror only, no probing/buffering. */
+        if (s_log_capped) {
+            return;
+        }
+
         /* USB stick pulled, card removed, host: gone: re-probe and retry. */
         if (debug_probe()) {
             debug_flush_early();
@@ -398,4 +592,24 @@ void ps2_debug_printf(const char* fmt, ...)
             debug_buffer(ms, msg);
         }
     }
+}
+
+/* Enters crash mode: after this point, PS2_LOG() will not touch files,
+ * only mirror to console. Called from the exception handler. */
+void ps2_debug_enter_crash_mode(void)
+{
+    if (s_crash_mode) {
+        return;
+    }
+
+    ps2_debug_flush_all();
+    s_crash_mode = 1;
+}
+
+/* Flushes stdio buffers (best effort). Kept free of fs_close/reopen: this
+ * runs from the exception vector, where the IOP may already be wedged. */
+void ps2_debug_flush_all(void)
+{
+    fflush(stdout);
+    fflush(stderr);
 }

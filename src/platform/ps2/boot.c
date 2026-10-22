@@ -3,11 +3,12 @@
  *
  * Runs before the engine starts, in this order:
  *
- *   telemetry -> persistent debug.log (survives a console freeze)
  *   timing    -> EE timebase (SDL_GetTicks/SDL_Delay)
- *   input     -> libpad init (DualShock 2)
- *   storage   -> USB/BDM IOP drivers for raw-ELF boots + ELF-relative
- *                asset discovery seeded from argv[0]
+ *   memory    -> heap baseline, canary, stack bounds
+ *   exception -> R5900 vectors before any I/O
+ *   storage   -> USB/BDM IOP drivers + active polling for mass:/mass0:
+ *   debug     -> per-line logger (probes mass:/mc0: AFTER storage)
+ *   input     -> libpad init (DualShock 2) AFTER storage
  *   fs        -> device probing + case-insensitive path resolution
  *   save      -> memory card / host save root
  *   logging   -> stdout/stderr redirected to mass:/FALLOUT2/debug.log
@@ -21,6 +22,7 @@
 #include "ps2_fs.h"
 #include "ps2_save.h"
 #include "ps2_storage.h"
+#include "ps2_exception.h"
 
 #include "ps2_debug.h"
 #include "ps2_mem.h"
@@ -65,14 +67,15 @@ static void boot_log_fs_roots(void)
 int ps2_boot(const char* argv0)
 {
     ps2_time_init();
-    ps2_debug_init();
     ps2_mem_init();
+    ps2_exception_init();
 
     PS2_LOG("[ps2] boot: argv0='%s'", argv0 != NULL ? argv0 : "");
     PS2_LOG("[ps2] boot: debug log='%s'", ps2_debug_path());
 
-    ps2_input_init();
     ps2_storage_init(argv0);
+    ps2_debug_init();
+    ps2_input_init();
 
     /* mass: exists now (ps2_storage_init() loaded usbd/usbmass_bd and
      * confirmed the device). Probe the data roots FIRST (ps2_fs_init does
@@ -96,6 +99,7 @@ int ps2_boot(const char* argv0)
 
     PS2_LOG("[ps2] boot: save root='%s'", ps2_save_root());
     PS2_LOG("[ps2] boot: heap free=%d KB used=%d KB", ps2_mem_free_kb(), ps2_mem_used_kb());
+    ps2_mem_stack_report();
     PS2_LOG("[ps2] boot: boot ok, timebase %u ms", (unsigned)ps2_time_ms());
 
     printf("[ps2] boot ok, timebase %u ms\n", (unsigned)ps2_time_ms());
