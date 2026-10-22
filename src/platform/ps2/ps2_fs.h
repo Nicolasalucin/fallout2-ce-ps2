@@ -38,6 +38,11 @@ extern "C" {
  * entry point calls it lazily, but ps2_boot() calls it eagerly for the log. */
 void ps2_fs_init(void);
 
+/* Re-probes the filesystem roots. Clears the probed flag and cache so a
+ * full scan runs again. Call after storage drivers have settled (e.g.,
+ * after ps2_storage_init() polling completes). */
+void ps2_fs_reprobe(void);
+
 /* Number of usable data roots found (0 when nothing is mounted). */
 int ps2_fs_root_count(void);
 

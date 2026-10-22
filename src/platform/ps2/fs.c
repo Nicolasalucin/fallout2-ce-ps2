@@ -7,6 +7,8 @@
 
 #include "ps2_fs.h"
 
+#include "ps2_debug.h"
+#include "ps2_exit.h"
 #include "ps2_log.h"
 #include "ps2_save.h"
 #include "ps2_storage.h"
@@ -21,7 +23,7 @@
 #include <strings.h> /* strncasecmp */
 #include <unistd.h>
 
-#define PS2_FS_MAX_ROOTS 12
+#define PS2_FS_MAX_ROOTS 24
 #define PS2_FS_ROOT_MAX 40
 #define PS2_FS_PATH_MAX 256
 /* PS2 port: 32 KB per pooled .DAT stream. The stream buffer is pure heap
@@ -30,11 +32,20 @@
 #define PS2_FS_DAT_BUFSIZE (64 * 1024)  /* 64 KB: optimizado para USB 1.1 bulk endpoints (PS2 ~1 MB/s). Buffers mayores reducen overhead de syscalls y maximizan throughput en DAT streams. */
 
 /* Fallback chain (after the ELF-relative roots, which ps2_fs_init()
- * prepends dynamically): mass: -> mass0: -> cdrom0: -> hdd0: -> host:. */
+ * prepends dynamically): every mass: instance the USB/BDM stack may create,
+ * then CD/DVD, HDD and the PCSX2/ps2link host filesystem. */
 static const char* const s_candidates[] = {
     "mass:/FALLOUT2/",       /* USB stick / MX4SIO in a FALLOUT2 folder */
     "mass:/",                /* USB stick with the data at the root */
     "mass0:/FALLOUT2/",      /* numbered mass device */
+    "mass0:/",
+    "mass1:/FALLOUT2/",
+    "mass1:/",
+    "mass2:/FALLOUT2/",
+    "mass2:/",
+    "mass3:/FALLOUT2/",
+    "mass3:/",
+    "mc0:/FALLOUT2/",        /* memory card install (small, but supported) */
     "cdrom0:/",              /* CD/DVD root */
     "cdrom0:/FALLOUT2/",     /* CD/DVD with the data in a FALLOUT2 folder */
     "hdd0:/FALLOUT2/",       /* internal HDD (PFS partition) */
@@ -46,6 +57,9 @@ static const char* const s_candidates[] = {
 static char s_roots[PS2_FS_MAX_ROOTS][PS2_FS_ROOT_MAX];
 static int s_root_count;
 static int s_probed;
+
+/* Defined below; used by ps2_fs_reprobe(). */
+static void fs_dir_cache_invalidate(void);
 
 /* True for a resolved memory-card path ("mc0:/..." / "mc1:/..."). */
 static int fs_is_mc_path(const char* path)
@@ -210,6 +224,17 @@ static void fs_validate_root(const char* root)
     printf("[ps2] fs: data root %d = '%s'\n", s_root_count, root);
 }
 
+/* Re-probe the filesystem roots. Clears the probed flag and cache so a
+ * full scan runs again. Call after storage drivers have settled (e.g.,
+ * after ps2_storage_init() polling completes). */
+void ps2_fs_reprobe(void)
+{
+    s_probed = 0;
+    s_root_count = 0;
+    fs_dir_cache_invalidate();
+    ps2_fs_init();
+}
+
 void ps2_fs_init(void)
 {
     const char* elf_dir;
@@ -218,7 +243,6 @@ void ps2_fs_init(void)
     if (s_probed) {
         return;
     }
-    s_probed = 1;
 
     printf("[ps2] fs: probing game data devices...\n");
 
@@ -240,52 +264,58 @@ void ps2_fs_init(void)
     }
 
     if (s_root_count > 0) {
+        /* Only a successful probe marks the VFS as ready: a caller that runs
+         * while the USB stack is still settling can retry without
+         * ps2_fs_reprobe(). */
+        s_probed = 1;
         printf("[ps2] storage: asset root detected at %s\n", s_roots[0]);
+
+        /* Log layout resolution for diagnostics (config, data/, patches). */
+        for (i = 0; i < s_root_count; i++) {
+            int has_cfg = 0, has_data = 0, has_patch = 0;
+            char probe[PS2_FS_PATH_MAX];
+
+            snprintf(probe, sizeof(probe), "%sfallout2.cfg", s_roots[i]);
+            if (ps2_fs_canonicalize(probe, 0) == 0) has_cfg = 1;
+
+            snprintf(probe, sizeof(probe), "%sdata/", s_roots[i]);
+            if (ps2_fs_canonicalize(probe, 0) == 0) has_data = 1;
+
+            snprintf(probe, sizeof(probe), "%spatch000.dat", s_roots[i]);
+            if (ps2_fs_canonicalize(probe, 0) == 0) has_patch = 1;
+
+            PS2_LOG("[ps2] fs: root '%s' layout: cfg=%d data=%d patch=%d",
+                    s_roots[i], has_cfg, has_data, has_patch);
+        }
         return;
     }
 
     /* NO GAME DATA ROOT FOUND - CRITICAL ERROR
-     * Print detailed diagnostics, flush all streams, and sleep to allow
-     * USB driver to sync FAT32 sectors before returning (which may lead
-     * to a clean exit back to boot.elf). */
-    printf("[FATAL] No se pudo abrir MASTER.DAT en mass:/FALLOUT2/ o mass:/\n");
-    printf("[FATAL] Verifique que los archivos esten en MAYUSCULAS y el pendrive en FAT32/MBR.\n");
+     * Print detailed diagnostics, sync the log to USB, show fatal screen,
+     * and exit to loader. */
+    PS2_LOG("[FATAL] no game data root found");
+    PS2_LOG("[FATAL] expected: mass:/FALLOUT2/{master.dat,critter.dat}");
+    PS2_LOG("[FATAL]       or mass:/{master.dat,critter.dat}");
+    PS2_LOG("[FATAL]       or mass0:/FALLOUT2/, mass1:/FALLOUT2/, etc.");
+    PS2_LOG("[FATAL]       or cdrom0:/, hdd0:/FALLOUT2/, host:");
+    PS2_LOG("[FATAL] FAT32 with MBR required; names are matched case-insensitively");
+    PS2_LOG("[FATAL] cf. README_PS2.txt (install layout)");
+
+    printf("[FATAL] No se pudo abrir MASTER.DAT / CRITTER.DAT\n");
+    printf("[FATAL] Verifique el pendrive FAT32/MBR y la carpeta FALLOUT2/\n");
+    printf("[FATAL] Los nombres se resuelven sin distinción de mayúsculas/minúsculas\n");
+
+    /* Sync the log to USB (fflush alone is not enough on vfat). */
+    ps2_debug_sync();
     fflush(stdout);
     fflush(stderr);
 
-    /* Fail diagnostics: what does the PCSX2 host: root expose? */
-    {
-        DIR* d = opendir("host:");
-        if (d == NULL) {
-            d = opendir("host:/");
-        }
-        if (d == NULL) {
-            printf("[ps2] fs: diag: opendir(host:) failed\n");
-        } else {
-            struct dirent* e;
-            int n = 0;
-            printf("[ps2] fs: diag: host: contains:");
-            while ((e = readdir(d)) != NULL && n < 12) {
-                printf(" [%s]", e->d_name);
-                n++;
-            }
-            printf("\n");
-            closedir(d);
-        }
-    }
-
-    /* Force physical write to USB (flush FAT32 sectors) before returning.
-     * On real hardware, returning too fast leaves the USB driver with
-     * unsynced sectors; the clean exit to boot.elf loses the log. */
-    printf("[ps2] fs: syncing USB and pausing 3s before returning...\n");
-    fflush(stdout);
-    fflush(stderr);
-    {
-        int i;
-        for (i = 0; i < 3; i++) {
-            DelayThread(1000000); /* 1s x 3 = 3s */
-        }
-    }
+    /* Show fatal screen and exit to loader. */
+    ps2_fatal_show("NO GAME DATA",
+        "master.dat / critter.dat were not found.",
+        "Check the FAT32 stick and the FALLOUT2/ folder.",
+        "See README_PS2.txt.",
+        8000);
 }
 
 int ps2_fs_root_count(void)
@@ -656,8 +686,13 @@ static fs_dir_cache_slot_t* fs_dir_cache_fill(const char* dir)
         fs_dir_cache_invalidate();
     }
 
+#ifdef PS2_PCSX2_USB_MANIFEST
     /* PCSX2's usbhdfsd HLE hangs on readdir for mass:/ and mass:/FALLOUT2/.
-     * Workaround: manually populate cache for known Fallout 2 media layout. */
+     * Workaround (DEV ONLY): manually populate cache for known Fallout 2 media
+     * layout. This MUST NOT be enabled in production builds; it replaces the
+     * real directory listing and breaks config, saves, mods and the mass:/ root
+     * fallback. Controlled by CMake option PS2_PCSX2_USB_MANIFEST (OFF by
+     * default). */
     if (strcmp(dir, "mass:/") == 0) {
         /* Known entry on Fallout 2 media: FALLOUT2/ (directory). */
         if (s_dir_arena_used + 1 + 9 > PS2_FS_DIR_CACHE_ARENA) {
@@ -706,6 +741,7 @@ static fs_dir_cache_slot_t* fs_dir_cache_fill(const char* dir)
         slot->valid = 1;
         return slot;
     }
+#endif /* PS2_PCSX2_USB_MANIFEST */
 
     d = fs_opendir(dir);
     if (d == NULL) {
