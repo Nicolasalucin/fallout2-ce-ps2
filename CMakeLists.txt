@@ -16,6 +16,11 @@ endif()
 
 project(${EXECUTABLE_NAME})
 
+if(PS2)
+    # The R5900 exception vector is preprocessed assembly.
+    enable_language(ASM)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
@@ -32,11 +37,15 @@ option(FALLOUT_VENDORED "Use vendored third-party libraries" ON)
 option(PS2_BUILD "Build for the PlayStation 2 (PS2SDK cross toolchain)" OFF)
 option(PS2_DEV_SMOKE_TEST "Enable F6 smoke harness (automated acceptance test)" OFF)
 option(PS2_STRIP_ELF "Strip FALLOUT2.ELF in Release builds (disable for crash symbolization)" ON)
+option(PS2_PCSX2_USB_MANIFEST "Synthesize mass: listings for PCSX2 USB-image test (DEV ONLY)" OFF)
 if(PS2_BUILD)
     set(PS2 TRUE)
 endif()
 if(PS2_DEV_SMOKE_TEST)
     add_compile_definitions(PS2_DEV_SMOKE_TEST)
+endif()
+if(PS2_PCSX2_USB_MANIFEST)
+    add_compile_definitions(PS2_PCSX2_USB_MANIFEST)
 endif()
 
 # Verbose debug logging (PS2_LOGV/PS2_DEBUG_LOGV) only in non-Release builds.
@@ -339,6 +348,14 @@ if(PS2)
     # Native PlayStation 2 platform layer (C99) + two C++ shims (entry point
     # and the SDL2-subset implementation). The audio worker streams mixed PCM
     # to the SPU2 through audsrv.
+    #
+    # The engine ships src/debug.h (C++); ps2sdk's libdebug header has the
+    # same name. Copy the SDK header under a unique name so the crash reporter
+    # can include it without the engine header shadowing it.
+    configure_file("$ENV{PS2SDK}/ee/include/debug.h"
+                   "${CMAKE_CURRENT_BINARY_DIR}/ps2sdk_debug.h" COPYONLY)
+    target_include_directories(${EXECUTABLE_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+
     target_sources(${EXECUTABLE_NAME} PRIVATE
         "src/platform/ps2/main.cc"
         "src/platform/ps2/boot.c"
@@ -360,6 +377,9 @@ if(PS2)
         "src/platform/ps2/platform_compat_ps2.cc"
         "src/platform/ps2/memory_manager_ps2.cc"
         "src/platform/ps2/sdl/sdl_shim.c"
+        "src/platform/ps2/ps2_exception.c"
+        "src/platform/ps2/ps2_exception_asm.S"
+        "src/platform/ps2/ps2_exit.c"
     )
 
     # The engine sources are flat in src/ while the platform layer lives below
@@ -482,10 +502,12 @@ if(PS2)
     # from ps2sdk's ports collection: the engine already inflates DAT entries
     # with it (src/dfile.cc), and building the vendored copy for the EE would
     # only duplicate what the SDK ships.
+    # -ldebug must come before -lgraph: the crash screen uses GS symbols.
     target_link_libraries(${EXECUTABLE_NAME}
         gskit
         dmakit
-        graph
+        -ldebug
+        -lgraph
         pad
         audsrv
         z
