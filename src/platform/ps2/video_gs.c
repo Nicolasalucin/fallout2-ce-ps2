@@ -12,7 +12,8 @@
  *   GS VRAM: CT32 texture (no CLUT at all)
  *        |  full-screen textured quad
  *        v
- *   framebuffer flip on vsync -> NTSC 640x448 @ 60 Hz interlaced
+ *   framebuffer flip on vsync -> PAL 640x448 @ 50 Hz or NTSC 640x448 @ 60 Hz
+ *   (region auto-detected from the boot ROM, PS2VIDEO.CFG overrides it)
  *
  * Doing the palette lookup on the EE (Option A) removes the GS CLUT,
  * the CSM1 swizzle question and the T8 TBW pitfalls from the equation.
@@ -21,32 +22,46 @@
  */
 
 #include "ps2_video.h"
+#include "ps2_debug.h"
+#include "ps2_exit.h"
 #include "ps2_time.h"
 #ifdef PS2_DEV_SMOKE_TEST
 #include "ps2_perf.h"
 #endif
 #include "ps2_osk.h"
+#include "ps2_storage.h"
 #include "sdl/ps2_sdl_internal.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
+#include <delaythread.h>
 #include <gsKit.h>
 #include <dmaKit.h>
 #include <gsToolkit.h>
 #include <kernel.h>
+#include <rom0_info.h>
 
 #define PS2_SCR_W 640
 #define PS2_SCR_H 480
 #define PS2_OUT_W 640
 #define PS2_OUT_H 448
 
+/* No first frame within this window means the GS never signalled VSYNC
+ * (wrong video mode for the cable, dead GS, ...). */
+#define PS2_VIDEO_WATCHDOG_MS 15000
+
 static int s_video_inited;
 static int s_present_logged;
 static GSGLOBAL* s_gs;
 static GSTEXTURE s_texture;
+static int s_is_pal;
+static volatile int s_first_present_done;
+static int s_watchdog_started;
+static unsigned char s_watchdog_stack[32 * 1024] __attribute__((aligned(16)));
 
 /* Per-phase accumulators (ms) for boot diagnostics; reset by the selftest. */
 static u32 s_phase_ms[4];
@@ -64,6 +79,136 @@ static u8 s_staging[PS2_SCR_W * PS2_SCR_H] __attribute__((aligned(64)));
  * 1.2 MB in BSS, 64-byte aligned for the GIF DMAC. */
 static u32 s_fb_rgba[PS2_SCR_W * PS2_SCR_H] __attribute__((aligned(64)));
 
+/* Returns 1 for PAL, 0 for NTSC, -1 for "auto". Reads the optional override
+ * from the same media as the game data; the config is ignored if the device
+ * is not mounted. PS2VIDEO.CFG holds a single "mode=pal" or "mode=ntsc"
+ * line, either case. */
+static int video_read_override(void)
+{
+    static const char* const devices[] = { "mass:", "mass0:", "mc0:" };
+    static const char* const paths[] = {
+        "mass:/FALLOUT2/PS2VIDEO.CFG",
+        "mass0:/FALLOUT2/PS2VIDEO.CFG",
+        "mc0:/FALLOUT2/PS2VIDEO.CFG",
+    };
+    int i;
+
+    for (i = 0; i < (int)(sizeof(paths) / sizeof(paths[0])); i++) {
+        FILE* f;
+        char line[64];
+
+        if (!ps2_storage_device_present(devices[i])) {
+            continue;
+        }
+
+        f = fopen(paths[i], "r");
+        if (f == NULL) {
+            continue;
+        }
+
+        while (fgets(line, sizeof(line), f) != NULL) {
+            char* value = line;
+            char* end;
+
+            while (*value == ' ' || *value == '\t') {
+                value++;
+            }
+            if (strncasecmp(value, "mode=", 5) != 0) {
+                continue;
+            }
+            value += 5;
+            end = value + strlen(value);
+            while (end > value && (end[-1] == '\n' || end[-1] == '\r'
+                                      || end[-1] == ' ' || end[-1] == '\t')) {
+                end--;
+            }
+            *end = '\0';
+
+            if (strcasecmp(value, "pal") == 0) {
+                fclose(f);
+                return 1;
+            }
+            if (strcasecmp(value, "ntsc") == 0) {
+                fclose(f);
+                return 0;
+            }
+        }
+
+        fclose(f);
+    }
+
+    return -1;
+}
+
+/* Console region from the boot ROM name: character 4 is the region letter
+ * (E = Europe/PAL). GetRomName() lives in the EE kernel and works without any
+ * IRX; PS2VIDEO.CFG wins when present. */
+static int video_detect_pal(void)
+{
+    char romname[16];
+    int override = video_read_override();
+
+    if (override >= 0) {
+        printf("[ps2] video: region override %s (PS2VIDEO.CFG)\n",
+            override ? "PAL" : "NTSC");
+        PS2_LOG("[ps2] video: region override %s (PS2VIDEO.CFG)",
+            override ? "PAL" : "NTSC");
+        return override;
+    }
+
+    memset(romname, 0, sizeof(romname));
+    GetRomName(romname);
+    PS2_LOG("[ps2] video: ROM name '%s'", romname);
+    return romname[4] == 'E';
+}
+
+static void video_watchdog_thread(void* arg)
+{
+    (void)arg;
+
+    DelayThread(PS2_VIDEO_WATCHDOG_MS * 1000);
+
+    if (!s_first_present_done) {
+        ps2_fatal_show("GS PRESENT TIMEOUT",
+            "No first frame was presented within 15 seconds.",
+            "The GS did not signal VSYNC.",
+            "Check the video cable and the PAL/NTSC override.",
+            8000);
+    }
+
+    s_watchdog_started = 0;
+    ExitThread();
+}
+
+static void video_start_watchdog(void)
+{
+    ee_thread_t thread;
+    int tid;
+
+    if (s_watchdog_started) {
+        return;
+    }
+
+    memset(&thread, 0, sizeof(thread));
+    thread.func = (void*)video_watchdog_thread;
+    thread.stack = s_watchdog_stack + sizeof(s_watchdog_stack);
+    thread.stack_size = sizeof(s_watchdog_stack);
+    thread.gp_reg = &_gp;
+    thread.initial_priority = 64;
+
+    tid = CreateThread(&thread);
+    if (tid < 0) {
+        PS2_LOG("[ps2] video: watchdog thread creation failed (%d)", tid);
+        return;
+    }
+
+    s_watchdog_started = 1;
+    if (StartThread(tid, NULL) < 0) {
+        s_watchdog_started = 0;
+        PS2_LOG("[ps2] video: watchdog thread start failed");
+    }
+}
+
 void ps2_video_init(void)
 {
     if (s_video_inited) {
@@ -76,8 +221,19 @@ void ps2_video_init(void)
     dmaKit_chan_init(DMA_CHANNEL_GIF);
 
     s_gs = gsKit_init_global();
+    if (s_gs == NULL) {
+        PS2_LOG("[ps2] video: gsKit_init_global returned NULL");
+        ps2_fatal_show("GS INITIALIZATION FAILED",
+            "gsKit could not allocate the global context.",
+            "The GS hardware did not respond.",
+            "Reset the console and try again.",
+            8000);
+    }
 
-    s_gs->Mode = GS_MODE_NTSC;
+    s_is_pal = video_detect_pal();
+    s_first_present_done = 0;
+
+    s_gs->Mode = s_is_pal ? GS_MODE_PAL : GS_MODE_NTSC;
     s_gs->Interlace = GS_INTERLACED;
     s_gs->Field = GS_FIELD;
     s_gs->Width = PS2_SCR_W;
@@ -102,12 +258,30 @@ void ps2_video_init(void)
      * the data is real color, so a linear filter would be correct too. */
     s_texture.Filter = GS_FILTER_NEAREST;
     gsKit_setup_tbw(&s_texture);
+    /* GSKIT_ALLOC_USERBUFFER: plain user allocation, no fixed 256-byte
+     * blocking. (GS_VRAM_BLOCKSIZE_256 is a byte count, not an alloc type,
+     * and truncates to 0 in the u8 parameter.) */
     s_texture.Vram = gsKit_vram_alloc(s_gs,
-        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_CT32), GS_VRAM_BLOCKSIZE_256);
+        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_CT32), GSKIT_ALLOC_USERBUFFER);
     s_texture.Mem = (u32*)s_fb_rgba;
 
-    printf("[ps2] video: NTSC 640x448 60Hz, CT32 tex @ %08x (TBW %u), CPU palette LUT\n",
+    if (s_texture.Vram == 0) {
+        PS2_LOG("[ps2] video: gsKit_vram_alloc returned 0");
+        ps2_fatal_show("GS VRAM ALLOCATION FAILED",
+            "gsKit could not reserve the 640x480 CT32 texture.",
+            "VRAM is fragmented or the GS is not responding.",
+            "Reset the console and try again.",
+            8000);
+    }
+
+    printf("[ps2] video: %s 640x448 %sHz, CT32 tex @ %08x (TBW %u), CPU palette LUT\n",
+        s_is_pal ? "PAL" : "NTSC", s_is_pal ? "50" : "60",
         (unsigned)s_texture.Vram, (unsigned)s_texture.TBW);
+    PS2_LOG("[ps2] video: %s 640x448, CT32 tex @ 0x%08x (TBW %u)",
+        s_is_pal ? "PAL" : "NTSC",
+        (unsigned)s_texture.Vram, (unsigned)s_texture.TBW);
+
+    video_start_watchdog();
 }
 
 void ps2_video_shutdown(void)
@@ -261,6 +435,12 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
         ps2_perf_stage_end(PS2_PERF_STAGE_PRESENT_FLIP);
 #endif
         t4 = ps2_time_ms();
+
+        if (!s_first_present_done) {
+            s_first_present_done = 1;
+            PS2_LOG("[ps2] video: first frame presented (%u ms after boot, %s)",
+                (unsigned)t4, s_is_pal ? "PAL" : "NTSC");
+        }
 
         s_phase_ms[0] += t1 - t0;
         s_phase_ms[1] += t2 - t1;
