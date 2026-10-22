@@ -133,21 +133,43 @@ const char* ps2_storage_elf_dir(void)
 
 /* --------------------------------------------------------- IOP modules --- */
 
-static int storage_device_present(const char* dir)
-{
-    char tmp[PS2_STORAGE_DIR_MAX + 2];
-    DIR* d;
+#include <sys/stat.h>
 
-    d = opendir(dir);
-    if (d != NULL) {
-        closedir(d);
+/* Probes a device root or directory without ever calling readdir(): the
+ * usbhdfsd HLE in PCSX2 can wedge on the first readdir after vfat opens.
+ * stat() is the cheap path; some IOP drivers only answer fioOpen() for a
+ * directory root, so open() is the fallback. */
+static int storage_probe_dir(const char* dev)
+{
+    char with_slash[PS2_STORAGE_DIR_MAX + 2];
+    struct stat st;
+    int fd;
+
+    if (dev == NULL || dev[0] == '\0') {
+        return 0;
+    }
+
+    with_slash[0] = '\0';
+
+    if (stat(dev, &st) == 0) {
         return 1;
     }
 
-    if (snprintf(tmp, sizeof(tmp), "%s/", dir) < (int)sizeof(tmp)) {
-        d = opendir(tmp);
-        if (d != NULL) {
-            closedir(d);
+    if (snprintf(with_slash, sizeof(with_slash), "%s/", dev) < (int)sizeof(with_slash)
+        && stat(with_slash, &st) == 0) {
+        return 1;
+    }
+
+    fd = open(dev, O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+        return 1;
+    }
+
+    if (with_slash[0] != '\0') {
+        fd = open(with_slash, O_RDONLY);
+        if (fd >= 0) {
+            close(fd);
             return 1;
         }
     }
@@ -155,9 +177,28 @@ static int storage_device_present(const char* dir)
     return 0;
 }
 
+static int storage_wait_dir(const char* dev, int attempts, unsigned int step_ms)
+{
+    int i;
+    for (i = 0; i < attempts; i++) {
+        if (storage_probe_dir(dev)) {
+            return i + 1;
+        }
+        DelayThread(step_ms * 1000);
+    }
+    return 0;
+}
+
+int ps2_storage_device_present(const char* path)
+{
+    return storage_probe_dir(path);
+}
+
 static int storage_mass_present(void)
 {
-    return storage_device_present("mass:") || storage_device_present("mass0:");
+    return storage_probe_dir("mass:")
+        || storage_probe_dir("mass0:")
+        || storage_probe_dir("mass1:");
 }
 
 int ps2_irx_exec(const char* name, const unsigned char* data, unsigned int size)
@@ -226,6 +267,12 @@ void ps2_irx_alignment_report(void)
 
 void ps2_storage_init(const char* argv0)
 {
+    static const char* const mounts[] = { "mass:", "mass0:", "mass1:", "mass2:", "mass3:" };
+    int mass_already;
+    const char* ready = NULL;
+    int tries;
+    int i;
+
     printf("[ps2] storage: ELF argv0 = '%s'\n", argv0 != NULL ? argv0 : "");
     PS2_LOG("[ps2] storage: ELF argv0 = '%s'", argv0 != NULL ? argv0 : "");
 
@@ -235,29 +282,29 @@ void ps2_storage_init(const char* argv0)
         PS2_LOG("[ps2] storage: ELF directory = '%s'", s_elf_dir);
     }
 
-    /* Loader-managed I/O: OPL mounts USB/MX4SIO/HDD itself, uLaunchELF the
-     * same, ps2link provides host:, PCSX2 emulates host:. Leave the IOP
-     * untouched in all of those cases. */
-    if (storage_mass_present()) {
-        printf("[ps2] storage: mass: already available (loader-managed)\n");
-        PS2_LOG("[ps2] storage: mass: already available (loader-managed)");
-        return;
-    }
-    if (storage_device_present("host:")) {
+    /* 1. PCSX2/ps2link host: I/O - bypass all USB/IOP bring-up. */
+    if (storage_probe_dir("host:")) {
         printf("[ps2] storage: host: available (development I/O), skipping USB bring-up\n");
         PS2_LOG("[ps2] storage: host: available (development I/O), skipping USB bring-up");
         return;
     }
 
-    printf("[ps2] storage: bringing up USB mass storage\n");
-    PS2_LOG("[ps2] storage: bringing up USB mass storage (no loader-provided modules)");
-    sceSifInitRpc(0);
+    mass_already = storage_mass_present();
 
-    storage_exec_irx("usbd.irx", g_ps2_usbd_irx, g_ps2_usbd_irx_size);
-    DelayThread(500000); /* let the usbd thread start */
+    if (!mass_already) {
+        printf("[ps2] storage: bringing up USB mass storage\n");
+        PS2_LOG("[ps2] storage: bringing up USB mass storage (no loader-provided modules)");
+        sceSifInitRpc(0);
 
-    storage_exec_irx("usbhdfsd.irx", g_ps2_usbhdfsd_irx, g_ps2_usbhdfsd_irx_size);
-    DelayThread(500000); /* let the usbhdfsd thread start */
+        storage_exec_irx("usbd.irx", g_ps2_usbd_irx, g_ps2_usbd_irx_size);
+        DelayThread(500000); /* let the usbd thread start */
+
+        storage_exec_irx("usbhdfsd.irx", g_ps2_usbhdfsd_irx, g_ps2_usbhdfsd_irx_size);
+        DelayThread(500000); /* let the usbhdfsd thread start */
+    } else {
+        printf("[ps2] storage: mass: already mounted (loader-managed), waiting for settle...\n");
+        PS2_LOG("[ps2] storage: mass: already mounted (loader-managed), waiting for settle...");
+    }
 
     /* Load memory card modules early so they initialize during the wait loop
      * (replicates the old MX4SIO/BDM bring-up which implicitly did this). */
@@ -266,47 +313,66 @@ void ps2_storage_init(const char* argv0)
     SifLoadModule("rom0:MCMAN", 0, NULL);
     SifLoadModule("rom0:MCSERV", 0, NULL);
 
-    /* ACTIVE POLLING LOOP FOR mass: WITH TIMEOUT
-     * On real PS2 Slim hardware, the USB 1.1 bus + usbhdfsd.irx need 1.5-4s to
-     * negotiate the pendrive, read the MBR, and register the mass: mount point.
-     * If we return too early, the game tries to read assets before mass: exists,
-     * causing a clean exit() back to boot.elf (race condition).
-     * Poll with 300ms intervals for up to ~4.5s (15 retries). */
-    {
-        int tries;
-        int fd;
-        int mass_ready = 0;
+    /* 2. ACTIVE POLLING FOR mass:/mass0:..mass3:
+     * On real PS2 Slim hardware the USB 1.1 bus + usbhdfsd.irx need 1.5-4 s
+     * to negotiate the stick, read the MBR and register the mount point.
+     * This runs even when the loader already mounted mass:, because the
+     * mount can still be settling while the first readdir() arrives. */
+    printf("[ps2] storage: waiting for mass:/mass0:..mass3: to settle (USB 1.1)...\n");
+    PS2_LOG("[ps2] storage: waiting for mass:/mass0:..mass3: to settle (USB 1.1)...");
 
-        printf("[ps2] storage: waiting for mass: to settle (USB 1.1)...\n");
-        PS2_LOG("[ps2] storage: waiting for mass: to settle (USB 1.1)...");
-
-        for (tries = 0; tries < 15; tries++) {
-            fd = open("mass:/", O_RDONLY);
-            if (fd >= 0) {
-                close(fd);
-                mass_ready = 1;
+    for (tries = 0; tries < 20 && ready == NULL; tries++) { /* 20 x 300 ms = 6 s */
+        for (i = 0; i < (int)(sizeof(mounts) / sizeof(mounts[0])); i++) {
+            if (storage_probe_dir(mounts[i])) {
+                ready = mounts[i];
                 break;
             }
-            DelayThread(300000); /* 300ms */
         }
 
-        if (mass_ready) {
-            printf("[ps2] storage: mass: ready after %d attempt(s)\n", tries + 1);
-            PS2_LOG("[ps2] storage: mass: ready after %d attempt(s)", tries + 1);
-        } else {
-            printf("[ps2] storage: WARNING mass: did not settle in time (timeout)\n");
-            PS2_LOG("[ps2] storage: WARNING mass: did not settle in time (timeout)");
+        if (ready == NULL) {
+            DelayThread(300000);
         }
     }
 
-    /* Give the IOP time to initialize mc0: and other devices
-     * (the old 20s MX4SIO/BDM bring-up provided this implicitly). */
-    {
-        int i;
-        for (i = 0; i < 20; i++) {
-            DelayThread(500000); /* 10s total */
+    if (ready != NULL) {
+        printf("[ps2] storage: %s ready after %d attempt(s)\n", ready, tries + 1);
+        PS2_LOG("[ps2] storage: %s ready after %d attempt(s)", ready, tries + 1);
+    } else {
+        printf("[ps2] storage: WARNING mass: did not settle in time (timeout)\n");
+        PS2_LOG("[ps2] storage: WARNING mass:/mass0:..mass3: did not settle in time (timeout)");
+
+        /* 3. BDM block-device fallback (USB via usbmass_bd, MX4SIO). Only
+         * reached when the canonical usbhdfsd stack did not answer. */
+        PS2_LOG("[ps2] storage: trying BDM/MX4SIO fallback");
+        storage_exec_irx("bdm.irx", g_ps2_bdm_irx, g_ps2_bdm_irx_size);
+        storage_exec_irx("usbmass_bd.irx", g_ps2_usbmass_bd_irx, g_ps2_usbmass_bd_irx_size);
+        storage_exec_irx("bdmfs_fatfs.irx", g_ps2_bdmfs_fatfs_irx, g_ps2_bdmfs_fatfs_irx_size);
+        storage_exec_irx("sio2man.irx", g_ps2_sio2man_irx, g_ps2_sio2man_irx_size);
+        storage_exec_irx("mx4sio_bd.irx", g_ps2_mx4sio_bd_irx, g_ps2_mx4sio_bd_irx_size);
+
+        ready = NULL;
+        for (tries = 0; tries < 20 && ready == NULL; tries++) { /* another 6 s */
+            for (i = 0; i < (int)(sizeof(mounts) / sizeof(mounts[0])); i++) {
+                if (storage_probe_dir(mounts[i])) {
+                    ready = mounts[i];
+                    break;
+                }
+            }
+
+            if (ready == NULL) {
+                DelayThread(300000);
+            }
+        }
+
+        if (ready != NULL) {
+            printf("[ps2] storage: %s ready after BDM fallback (%d attempt(s))\n", ready, tries + 1);
+            PS2_LOG("[ps2] storage: %s ready after BDM fallback (%d attempt(s))", ready, tries + 1);
         }
     }
+
+    /* 4. Wait for mc0: to be ready (for ps2_save_init).
+     * 10 attempts * 100ms = 1s (replaces the old fixed 10 s delay). */
+    storage_wait_dir("mc0:", 10, 100);
 
     if (storage_mass_present()) {
         printf("[ps2] storage: mass: ready\n");
@@ -314,5 +380,10 @@ void ps2_storage_init(const char* argv0)
     } else {
         printf("[ps2] storage: mass: not available\n");
         PS2_LOG("[ps2] storage: mass: not available (game data must be on mc0:/cdrom0:/hdd0:)");
+
+        /* If no mass: but we have mc0:, that's still a valid data path for saves. */
+        if (storage_probe_dir("mc0:")) {
+            PS2_LOG("[ps2] storage: mc0: available for saves");
+        }
     }
 }

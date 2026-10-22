@@ -45,6 +45,11 @@ void ps2_irx_alignment_report(void);
  * usable device path. Valid after ps2_storage_init(). */
 const char* ps2_storage_elf_dir(void);
 
+/* Returns 1 when `path` (a device root or directory) can be stat'ed or
+ * opened. Uses stat()/dopen() first so it never triggers the usbhdfsd
+ * readdir path that hangs under PCSX2's HLE. */
+int ps2_storage_device_present(const char* path);
+
 #ifdef __cplusplus
 }
 #endif

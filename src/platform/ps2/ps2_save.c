@@ -29,6 +29,7 @@
 #include "ps2_debug.h"
 #include "ps2_fs.h"
 #include "ps2_log.h"
+#include "ps2_storage.h"
 
 #define PS2_SAVE_ROOT_MAX 80
 #define PS2_SAVE_PATH_MAX 256
@@ -67,19 +68,7 @@ static void save_put_f32(unsigned char* p, float v)
 /* Only used by the device probe; smoke builds always take the host path. */
 static int save_dir_exists(const char* dir)
 {
-    char tmp[PS2_SAVE_PATH_MAX];
-    DIR* d;
-
-    d = opendir(dir);
-    if (d == NULL && snprintf(tmp, sizeof(tmp), "%s/", dir) < (int)sizeof(tmp)) {
-        d = opendir(tmp);
-    }
-    if (d == NULL) {
-        return 0;
-    }
-
-    closedir(d);
-    return 1;
+    return ps2_storage_device_present(dir);
 }
 #endif
 
