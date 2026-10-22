@@ -27,6 +27,10 @@ int ps2_mem_free_kb(void);
  * mark of the newlib heap). */
 int ps2_mem_sbrk_kb(void);
 
+/* Logs the current thread stack bounds, the high-water mark painted by
+ * ps2_mem_init() and whether the bottom guard is still intact. */
+void ps2_mem_stack_report(void);
+
 #ifdef __cplusplus
 }
 #endif
