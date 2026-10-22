@@ -8,12 +8,13 @@
  
  #define RPC_PACKET_SIZE 64
  
-@@ -288,15 +289,247 @@
+@@ -288,15 +289,264 @@
  
  
  /* Command 0x80000008 */
 +extern SifRpcClientData_t _fio_cd;
 +extern void _fio_intr(void *);
++extern void _fio_read_intr(void *);
 +
 +static int _rpc_client_ptr_ok(const void *ptr)
 +{
@@ -34,6 +35,23 @@
 +        return 0;
 +
 +    return ((p - base) & (RPC_PACKET_SIZE - 1)) == 0;
++}
++
++/* The canonical fileio driver installs one of two fixed kernel callbacks:
++ * _fio_intr for RPC calls and _fio_read_intr for the deferred read path.
++ * Both must be accepted by the completion handler. */
++static int _rpc_is_fio_callback(SifRpcEndFunc_t fn)
++{
++    return fn == (SifRpcEndFunc_t)_fio_intr
++        || fn == (SifRpcEndFunc_t)_fio_read_intr;
++}
++
++static void _rpc_call_fio(SifRpcClientData_t *cd)
++{
++    if (cd->end_function == (SifRpcEndFunc_t)_fio_read_intr)
++        _fio_read_intr(cd->end_param);
++    else
++        _fio_intr(cd->end_param);
 +}
 +
 +static void _rpc_dump_client(const char *name, const SifRpcClientData_t *cd)
@@ -87,8 +105,7 @@
 + * sceSifRpcDumpInvalidCompletion(). */
 +static void _rpc_recover_invalid_completion(SifRpcRendPkt_t *request, SifRpcClientData_t *cd)
 +{
-+    int cd_is_fio = (cd == &_fio_cd
-+        || (void *)cd->end_function == (void *)_fio_intr);
++    int cd_is_fio = (cd == &_fio_cd || _rpc_is_fio_callback(cd->end_function));
 +    int fio_fallback = (!cd_is_fio
 +        && !_rpc_packet_ptr_ok(_fio_cd.hdr.pkt_addr)
 +        && _fio_cd.hdr.sema_id >= 0);
@@ -103,7 +120,7 @@
 +
 +    if (request->cid == SIF_CMD_RPC_CALL) {
 +        if (is_fio)
-+            _fio_intr(target->end_param);
++            _rpc_call_fio(target);
 +    } else if (request->cid == SIF_CMD_RPC_BIND) {
 +        target->server = request->sd;
 +        target->buf    = request->buf;
@@ -242,11 +259,11 @@
      if (request->cid == SIF_CMD_RPC_CALL) {
 -        if (cd->end_function)
 -            cd->end_function(cd->end_param);
-+        if (cd == &_fio_cd || (void *)cd->end_function == (void *)_fio_intr) {
++        if (cd == &_fio_cd || _rpc_is_fio_callback(cd->end_function)) {
 +            /* Fileio is the only blocking SIF client in this port. Its end
-+             * function is a fixed kernel symbol; pass end_param through so
++             * functions are fixed kernel symbols; pass end_param through so
 +             * the canonical fileio driver sees its context in $a0. */
-+            _fio_intr(cd->end_param);
++            _rpc_call_fio(cd);
 +        } else if (cd->end_function != NULL) {
 +            /* Never jump through an arbitrary client callback from the SIF
 +             * interrupt handler. A stale/corrupt pointer is typically
